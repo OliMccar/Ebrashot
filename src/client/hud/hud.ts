@@ -2,7 +2,8 @@ import type { Team } from '../../shared/constants';
 import type { MapData } from '../../shared/map';
 import type { V3 } from '../../shared/math';
 import type { PlayerNet, Snapshot } from '../../shared/protocol';
-import { type BuyItemId, SHOP, WEAPONS, priceFor } from '../../shared/weapons';
+import { type CrosshairCfg, drawCrosshair } from '../crosshair';
+import { type BuyItemId, SHOP, type ShopEntry, WEAPONS, priceFor } from '../../shared/weapons';
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 
@@ -13,12 +14,24 @@ function el(tag: string, cls: string, html = '') {
   return e;
 }
 
+/** Categorias da loja radial, na ordem das teclas 1..n. */
+const BUY_CATS = [...new Set(SHOP.map((s) => s.category))];
+
+/** Caminho SVG de um setor de anel (ângulos em radianos, 0 = topo, sentido horário). */
+function wedgePath(r0: number, r1: number, a0: number, a1: number) {
+  const pt = (r: number, a: number) => `${(Math.sin(a) * r).toFixed(1)},${(-Math.cos(a) * r).toFixed(1)}`;
+  const big = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${pt(r0, a0)} L${pt(r1, a0)} A${r1},${r1} 0 ${big} 1 ${pt(r1, a1)} L${pt(r0, a1)} A${r0},${r0} 0 ${big} 0 ${pt(r0, a0)} Z`;
+}
+
 const fmtTime = (s: number) => { const t = Math.max(0, Math.ceil(s)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
 export interface HudState {
   hp: number; armor: number; helmet: boolean; money: number; weaponName: string; mag: number; res: number; showAmmo: boolean;
   inacc: number; scoped: boolean; alive: boolean; plantP: number; defuseP: number; canBuy: boolean; hint: string; spectating: string;
   fps: number; ping: number; kit: boolean; c4: boolean;
+  /** abertura dinâmica da mira (px CSS), deslocamento do recoil (px CSS), gap da arma (px CSS) e se está assistindo alguém */
+  spreadPx: number; recoilX: number; recoilY: number; weaponGapPx: number; specActive: boolean;
 }
 
 /** HUD em DOM, atualizado apenas quando os valores mudam. */
@@ -37,7 +50,9 @@ export class Hud {
   private bannerEl: HTMLElement;
   private toastEl: HTMLElement;
   private hitEl: HTMLElement;
-  private crossEl: HTMLElement;
+  private crossEl: HTMLCanvasElement;
+  private crossCtx: CanvasRenderingContext2D;
+  private crossVer = 1;
   private scopeEl: HTMLElement;
   private progEl: HTMLElement;
   private flashLeft = 0;
@@ -51,14 +66,16 @@ export class Hud {
   onBuy: (item: BuyItemId) => void = () => {};
   onBuyClose: () => void = () => {};
 
-  constructor(private map: MapData, mobile: boolean, crossColor: string) {
+  constructor(private map: MapData, mobile: boolean, private xh: () => CrosshairCfg) {
     this.root = document.getElementById('hud')!;
     this.root.innerHTML = '';
     this.root.classList.toggle('mobile', mobile);
-    this.root.style.setProperty('--cross', crossColor);
     const top = el('div', 'hud-top', `
-      <div class="score-box"><span class="sc-t">0</span><div class="timer"><span class="tm">0:00</span><span class="bomb-ico">💣</span></div><span class="sc-ct">0</span></div>
-      <div class="alive-row"><span class="alive-t"></span><span class="alive-ct"></span></div>`);
+      <div class="score-box">
+        <div class="ts T"><span class="alive alive-t">0</span><b class="sc-t">0</b></div>
+        <div class="timer"><span class="tm">0:00</span><span class="bomb-ico">💣</span></div>
+        <div class="ts CT"><b class="sc-ct">0</b><span class="alive alive-ct">0</span></div>
+      </div>`);
     this.root.appendChild(top);
     this.radar = el('canvas', 'radar') as HTMLCanvasElement;
     const rs = mobile ? 140 : 190;
@@ -69,14 +86,16 @@ export class Hud {
     this.radarMap = this.buildRadarMap();
     this.root.appendChild(el('div', 'money', '<span class="mo">$800</span><span class="mo-delta"></span>'));
     this.root.appendChild(el('div', 'bottom-left', `
-      <div class="hp"><span class="ico">✚</span><span class="hpv">100</span></div>
-      <div class="ar"><span class="ico">⛨</span><span class="arv">0</span></div>
+      <div class="hp"><span class="ico">✚</span><span class="hpv">100</span><i class="bar"><i class="hpb"></i></i></div>
+      <div class="ar"><span class="ico">⛨</span><span class="arv">0</span><i class="bar"><i class="arb"></i></i></div>
       <div class="kit-ico">🔧</div><div class="c4-ico">C4</div>`));
     this.root.appendChild(el('div', 'bottom-right', '<div class="wname"></div><div class="ammo"><span class="mag">0</span><span class="res">/ 0</span></div>'));
     this.killfeed = el('div', 'killfeed');
     this.root.appendChild(this.killfeed);
-    this.crossEl = el('div', 'crosshair', '<i class="l"></i><i class="r"></i><i class="t"></i><i class="b"></i><i class="d"></i>');
+    this.crossEl = el('canvas', 'crosshair') as HTMLCanvasElement;
+    this.crossCtx = this.crossEl.getContext('2d')!;
     this.root.appendChild(this.crossEl);
+    this.setCrosshair();
     this.hitEl = el('div', 'hitmarker', '<i></i><i></i><i></i><i></i>');
     this.root.appendChild(this.hitEl);
     this.scopeEl = el('div', 'scope-overlay', '<div class="scope-hole"></div><i class="sh"></i><i class="sv"></i>');
@@ -94,10 +113,39 @@ export class Hud {
     this.root.appendChild(this.dmgEl);
     this.flashEl = el('div', 'flash-overlay');
     this.root.appendChild(this.flashEl);
-    this.buyEl = el('div', 'buy-menu panel');
+    this.buyEl = el('div', 'buy-menu');
     this.root.appendChild(this.buyEl);
-    this.scoreEl = el('div', 'scoreboard panel');
+    this.scoreEl = el('div', 'scoreboard');
     this.root.appendChild(this.scoreEl);
+  }
+
+  /** Avisa que a configuração da mira mudou (redesenha no próximo frame). */
+  setCrosshair() {
+    this.crossVer++;
+    this.root.style.setProperty('--sniper', this.xh().sniperWidth + 'px');
+  }
+
+  private drawCross(s: HudState) {
+    const cfg = this.xh();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const css = 260;
+    const px = Math.round(css * dpr);
+    if (this.crossEl.width !== px) { this.crossEl.width = this.crossEl.height = px; this.crossEl.style.width = this.crossEl.style.height = css + 'px'; this.crossVer++; }
+    const spread = Math.min(110, s.spreadPx);
+    const scale = (window.innerHeight / 1080) * dpr;
+    const key = `${this.crossVer}|${Math.round(spread * dpr)}|${Math.round(s.weaponGapPx)}|${scale.toFixed(3)}`;
+    if (this.cache['xh'] !== key) { this.cache['xh'] = key; drawCrosshair(this.crossCtx, cfg, spread * dpr, scale, s.weaponGapPx * dpr); }
+    const rx = cfg.recoil && s.alive ? Math.round(s.recoilX) : 0, ry = cfg.recoil && s.alive ? Math.round(s.recoilY) : 0;
+    const tr = `translate(calc(-50% + ${rx}px), calc(-50% + ${ry}px))`;
+    if (this.cache['xhT'] !== tr) { this.cache['xhT'] = tr; this.crossEl.style.transform = tr; }
+  }
+
+  private bar(sel: string, pct: number) {
+    const v = `${Math.max(0, Math.min(100, pct))}%`;
+    if (this.cache[sel + '|w'] === v) return;
+    this.cache[sel + '|w'] = v;
+    const e = $(sel, this.root);
+    if (e) e.style.width = v;
   }
 
   private set(sel: string, text: string, prop: 'text' | 'html' = 'text') {
@@ -123,9 +171,9 @@ export class Hud {
     cv.width = w; cv.height = h;
     const c = cv.getContext('2d')!;
     c.fillStyle = 'rgba(30,26,20,0.0)'; c.fillRect(0, 0, w, h);
-    c.fillStyle = 'rgba(214,190,140,0.85)';
+    c.fillStyle = 'rgba(190,196,200,0.8)';
     for (const r of m.walkable) c.fillRect((r.x0 - m.bounds.x0) * s, (r.z0 - m.bounds.z0) * s, (r.x1 - r.x0) * s, (r.z1 - r.z0) * s);
-    c.fillStyle = 'rgba(70,55,40,0.9)';
+    c.fillStyle = 'rgba(55,62,70,0.9)';
     for (const b of m.boxes) {
       if (!b.vis || b.max.y > 3 || b.max.y < 0.5) continue;
       c.fillRect((b.min.x - m.bounds.x0) * s, (b.min.z - m.bounds.z0) * s, (b.max.x - b.min.x) * s, (b.max.z - b.min.z) * s);
@@ -145,8 +193,12 @@ export class Hud {
     const s = this.radarScale;
     c.save();
     c.clearRect(0, 0, W, W);
-    c.beginPath(); c.arc(W / 2, W / 2, W / 2 - 2, 0, Math.PI * 2); c.closePath();
-    c.fillStyle = 'rgba(15,14,12,0.55)'; c.fill();
+    // radar quadrado com cantos levemente arredondados
+    const R = 14;
+    c.beginPath();
+    c.moveTo(R, 0); c.arcTo(W, 0, W, W, R); c.arcTo(W, W, 0, W, R); c.arcTo(0, W, 0, 0, R); c.arcTo(0, 0, W, 0, R);
+    c.closePath();
+    c.fillStyle = 'rgba(12,14,16,0.62)'; c.fill();
     c.clip();
     c.translate(W / 2, W / 2);
     c.scale(zoom, zoom);
@@ -164,7 +216,7 @@ export class Hud {
       if (!friend && !p.sp) continue;
       const [x, y] = tx(pos);
       c.save(); c.translate(x, y); c.rotate(-py);
-      c.fillStyle = friend ? (p.tm === 'T' ? '#f2b84b' : '#5aa0ff') : '#ff3b30';
+      c.fillStyle = friend ? (p.tm === 'T' ? '#e8b94a' : '#6fa8e8') : '#ff3b30';
       c.beginPath(); c.arc(0, 0, 6, 0, Math.PI * 2); c.fill();
       c.beginPath(); c.moveTo(-4, -4); c.lineTo(0, -11); c.lineTo(4, -4); c.fill();
       if (p.c4) { c.fillStyle = '#ff4040'; c.fillRect(-3, -3, 6, 6); }
@@ -185,6 +237,8 @@ export class Hud {
     this.set('.hpv', String(Math.max(0, s.hp)));
     this.toggle('.hp', 'low', s.hp <= 25);
     this.set('.arv', String(s.armor) + (s.helmet ? '+' : ''));
+    this.bar('.hpb', s.hp);
+    this.bar('.arb', s.armor);
     this.set('.mo', `$${s.money}`);
     this.toggle('.money', 'canbuy', s.canBuy);
     this.toggle('.kit-ico', 'on', s.kit);
@@ -198,10 +252,10 @@ export class Hud {
     this.set('.hint', s.hint);
     this.set('.spectate', s.spectating);
     this.set('.fps', s.fps ? `${s.fps} FPS${s.ping ? ` · ${s.ping} ms` : ''}` : '');
-    // mira dinâmica
-    const gap = Math.round(3 + Math.min(60, s.inacc * 900));
-    if (this.cache['gap'] !== String(gap)) { this.cache['gap'] = String(gap); this.crossEl.style.setProperty('--gap', gap + 'px'); }
-    this.toggle('.crosshair', 'hidden', s.scoped || !s.alive);
+    // mira personalizável
+    const showCross = !s.scoped && (s.alive || (s.specActive && this.xh().showSpectating));
+    this.toggle('.crosshair', 'hidden', !showCross);
+    if (showCross) this.drawCross(s);
     this.toggle('.scope-overlay', 'on', s.scoped);
     // progresso plant/defuse
     const p = Math.max(s.plantP, s.defuseP);
@@ -220,8 +274,8 @@ export class Hud {
       this.toggle('.timer', 'planted', planted);
       const aliveT = snap.players.filter((x) => x.tm === 'T' && x.a).length;
       const aliveCT = snap.players.filter((x) => x.tm === 'CT' && x.a).length;
-      this.set('.alive-t', `${aliveT} vivos`);
-      this.set('.alive-ct', `${aliveCT} vivos`);
+      this.set('.alive-t', String(aliveT));
+      this.set('.alive-ct', String(aliveCT));
       if (this.scoreOpen) this.renderScoreboard(snap);
     }
     // efeitos temporizados
@@ -267,28 +321,106 @@ export class Hud {
     setTimeout(() => row.remove(), 5000);
   }
 
-  // ---------------------------------------------------------------- loja
+  // ---------------------------------------------------------------- loja (roda de compra)
+  private buyCat = -1;
+  private buyArgs: [Team, number, number, boolean, number] = ['T', 0, 0, false, 0];
+  private buyItems: ShopEntry[] = [];
+  private onBuyKey = (e: KeyboardEvent) => {
+    if (!this.buyOpen) return;
+    const n = /^Digit([1-9])$/.exec(e.code);
+    if (n) {
+      e.preventDefault();
+      const i = Number(n[1]) - 1;
+      if (this.buyCat < 0) { if (i < BUY_CATS.length) this.enterCat(i); }
+      else if (i < this.buyItems.length) this.onBuy(this.buyItems[i].id);
+    } else if ((e.code === 'Backspace' || e.code === 'Digit0') && this.buyCat >= 0) { e.preventDefault(); this.enterCat(-1); }
+  };
+
   openBuy(team: Team, money: number, armor: number, helmet: boolean, buyLeft: number) {
     this.buyOpen = true;
+    this.buyCat = -1;
+    this.cache['buy'] = '';
     this.renderBuy(team, money, armor, helmet, buyLeft);
     this.buyEl.classList.add('on');
+    window.addEventListener('keydown', this.onBuyKey);
   }
-  closeBuy() { this.buyOpen = false; this.buyEl.classList.remove('on'); }
+  closeBuy() {
+    this.buyOpen = false;
+    this.buyEl.classList.remove('on');
+    window.removeEventListener('keydown', this.onBuyKey);
+  }
+
+  private enterCat(i: number) {
+    this.buyCat = i;
+    this.cache['buy'] = '';
+    this.renderBuy(...this.buyArgs);
+  }
 
   renderBuy(team: Team, money: number, armor: number, helmet: boolean, buyLeft: number) {
-    const cats = [...new Set(SHOP.map((s) => s.category))];
-    const key = `${team}|${money}|${armor}|${helmet}|${Math.ceil(buyLeft)}`;
-    if (this.cache['buy'] === key) return;
+    this.buyArgs = [team, money, armor, helmet, buyLeft];
+    const key = `${team}|${money}|${armor}|${helmet}|${this.buyCat}`;
+    const left = buyLeft > 0 ? `Tempo de compra: ${Math.ceil(buyLeft)}s` : 'Tempo de compra esgotado';
+    if (this.cache['buy'] === key) { this.set('.bw-left', left); return; }
     this.cache['buy'] = key;
-    this.buyEl.innerHTML = `<div class="buy-head"><b>Loja</b><span>$${money}</span><span class="buy-left">${buyLeft > 0 ? `Tempo de compra: ${Math.ceil(buyLeft)}s` : 'Tempo de compra esgotado'}</span><button class="buy-x">✕</button></div>
-      <div class="buy-cats">${cats.map((c) => `<div class="buy-cat"><h4>${c}</h4>${SHOP.filter((s) => s.category === c && (!s.team || s.team === team)).map((s) => {
+    delete this.cache['.bw-left'];
+    const name = (s: ShopEntry) => (s.id === 'molotov' ? (team === 'CT' ? 'Incendiária' : 'Molotov') : s.name);
+    type Slice = { label: string; sub: string; poor: boolean; act: string };
+    let slices: Slice[];
+    if (this.buyCat < 0) {
+      this.buyItems = [];
+      slices = BUY_CATS.map((c, i) => {
+        const its = SHOP.filter((s) => s.category === c && (!s.team || s.team === team));
+        const min = Math.min(...its.map((s) => priceFor(s.id, team, armor, helmet)));
+        return { label: c, sub: `${its.length} itens`, poor: min > money, act: `cat:${i}` };
+      });
+    } else {
+      this.buyItems = SHOP.filter((s) => s.category === BUY_CATS[this.buyCat] && (!s.team || s.team === team));
+      slices = this.buyItems.map((s) => {
         const price = priceFor(s.id, team, armor, helmet);
-        return `<button class="buy-item ${price > money ? 'poor' : ''}" data-item="${s.id}"><span>${s.id === 'molotov' ? (team === 'CT' ? 'Incendiária' : 'Molotov') : s.name}</span><em>$${price}</em></button>`;
-      }).join('')}</div>`).join('')}</div>`;
-    this.buyEl.querySelectorAll<HTMLButtonElement>('.buy-item').forEach((b) => {
-      b.onclick = (e) => { e.stopPropagation(); this.onBuy(b.dataset.item as BuyItemId); };
+        return { label: name(s), sub: `$${price}`, poor: price > money, act: `item:${s.id}` };
+      });
+    }
+    const n = slices.length;
+    const R0 = 92, R1 = 250, gap = 0.012;
+    const step = (Math.PI * 2) / n;
+    const off = -step / 2;
+    const wedges = slices.map((sl, i) => {
+      const a0 = off + i * step + gap, a1 = off + (i + 1) * step - gap;
+      const am = (a0 + a1) / 2, rm = (R0 + R1) / 2 + 6;
+      const x = Math.sin(am) * rm, y = -Math.cos(am) * rm;
+      const kx = Math.sin(am) * (R1 - 20), ky = -Math.cos(am) * (R1 - 20);
+      return `<g class="bw-slice ${sl.poor ? 'poor' : ''}" data-act="${sl.act}" data-label="${esc(sl.label)}" data-sub="${esc(sl.sub)}">
+        <path d="${wedgePath(R0, R1, a0, a1)}"/>
+        <text class="bw-key" x="${kx.toFixed(1)}" y="${(ky + 5).toFixed(1)}">${i + 1}</text>
+        <text class="bw-label" x="${x.toFixed(1)}" y="${(y - 2).toFixed(1)}">${esc(sl.label)}</text>
+        <text class="bw-sub" x="${x.toFixed(1)}" y="${(y + 18).toFixed(1)}">${esc(sl.sub)}</text>
+      </g>`;
+    }).join('');
+    const title = this.buyCat < 0 ? 'Loja' : BUY_CATS[this.buyCat];
+    const idle = this.buyCat < 0 ? 'Escolha uma categoria' : 'Clique no centro para voltar';
+    this.buyEl.innerHTML = `<div class="bw-wrap">
+      <svg class="bw" viewBox="-260 -260 520 520">${wedges}<circle class="bw-center ${this.buyCat >= 0 ? 'back' : ''}" r="${R0 - 6}"/></svg>
+      <div class="bw-mid">
+        <div class="bw-title">${esc(title)}</div>
+        <div class="bw-money">$${money}</div>
+        <div class="bw-info">${idle}</div>
+      </div>
+      <div class="bw-foot"><span class="bw-left">${left}</span><span>Teclas 1–${n}${this.buyCat >= 0 ? ' · 0 volta' : ''} · B ou Esc fecha</span></div>
+      <button class="bw-x" title="Fechar">✕</button>
+    </div>`;
+    const info = $('.bw-info', this.buyEl);
+    this.buyEl.querySelectorAll<SVGGElement>('.bw-slice').forEach((g) => {
+      g.addEventListener('mouseenter', () => { info.textContent = `${g.dataset.label} · ${g.dataset.sub}`; });
+      g.addEventListener('mouseleave', () => { info.textContent = idle; });
+      g.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const [kind, v] = g.dataset.act!.split(':');
+        if (kind === 'cat') this.enterCat(Number(v));
+        else this.onBuy(v as BuyItemId);
+      });
     });
-    ($('.buy-x', this.buyEl) as HTMLButtonElement).onclick = () => { this.closeBuy(); this.onBuyClose(); };
+    ($('.bw-x', this.buyEl) as HTMLButtonElement).onclick = () => { this.closeBuy(); this.onBuyClose(); };
+    if (this.buyCat >= 0) this.buyEl.querySelector('.bw-center')?.addEventListener('click', () => this.enterCat(-1));
   }
 
   // ---------------------------------------------------------------- placar
@@ -296,10 +428,14 @@ export class Hud {
 
   private renderScoreboard(s: Snapshot) {
     const rows = (t: Team) => s.players.filter((p) => p.tm === t).sort((a, b) => b.k - a.k || a.d - b.d).map((p) =>
-      `<tr class="${p.a ? '' : 'dead'} ${p.id === s.you ? 'me' : ''}"><td>${esc(p.n)}${p.c4 ? ' <b class="c4t">C4</b>' : ''}</td><td>${p.k}</td><td>${p.as}</td><td>${p.d}</td><td>${p.tm === s.team ? '$' + p.mo : ''}</td><td>${p.bot ? 'BOT' : p.ping}</td></tr>`).join('');
-    const html = `<div class="sb-head">Round ${s.round.round} / ${s.round.maxRounds} · Mapa Sahel</div>
-      <div class="sb-team CT"><div class="sb-title">CT <b>${s.round.sCT}</b></div><table><tr><th>Jogador</th><th>K</th><th>A</th><th>D</th><th>$</th><th>Ping</th></tr>${rows('CT')}</table></div>
-      <div class="sb-team T"><div class="sb-title">TR <b>${s.round.sT}</b></div><table><tr><th>Jogador</th><th>K</th><th>A</th><th>D</th><th>$</th><th>Ping</th></tr>${rows('T')}</table></div>`;
+      `<tr class="${p.a ? '' : 'dead'} ${p.id === s.you ? 'me' : ''}"><td class="pg">${p.bot ? 'BOT' : p.ping}</td><td class="nm">${p.a ? '' : '<i class="skull">☠</i>'}${esc(p.n)}${p.c4 ? ' <b class="c4t">C4</b>' : ''}</td><td class="mo">${p.tm === s.team ? '$' + p.mo : ''}</td><td>${p.k}</td><td>${p.as}</td><td>${p.d}</td></tr>`).join('');
+    const head = '<tr><th class="pg">Ping</th><th class="nm">Jogador</th><th class="mo">Dinheiro</th><th>K</th><th>A</th><th>D</th></tr>';
+    const team = (t: Team, label: string, score: number) => {
+      const alive = s.players.filter((p) => p.tm === t && p.a).length;
+      return `<div class="sb-team ${t}"><div class="sb-score"><b>${score}</b><small>${label}</small><small>${alive} vivos</small></div><table>${head}${rows(t)}</table></div>`;
+    };
+    const html = `<div class="sb-head"><b>Sahel</b><span>Defuse · Round ${s.round.round} de ${s.round.maxRounds}</span></div>
+      ${team('CT', 'Contra-Terroristas', s.round.sCT)}${team('T', 'Terroristas', s.round.sT)}`;
     if (this.cache['sb'] !== html) { this.cache['sb'] = html; this.scoreEl.innerHTML = html; }
   }
 }

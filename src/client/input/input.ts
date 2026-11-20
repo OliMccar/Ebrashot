@@ -14,6 +14,7 @@ export interface InputHooks {
   onMenu(): void;
   onInspect(): void;
   onSpectateNext(): void;
+  onEscape(): void;
   isUiOpen(): boolean;
 }
 
@@ -87,9 +88,13 @@ export class Input {
     this.on(window, 'wheel', (e) => { if (this.locked) this.cycleWeapon(e.deltaY > 0 ? 1 : -1); }, { passive: true });
     this.on(window, 'keydown', (e) => {
       const k = e.code;
+      // não captura atalhos enquanto o jogador digita ou usa o menu principal (ex.: Configurações durante a partida)
+      const tg = e.target as HTMLElement | null;
+      if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'SELECT' || tg.tagName === 'TEXTAREA')) return;
+      if (document.getElementById('menu')?.classList.contains('on')) return;
       if (k === 'Tab') { e.preventDefault(); this.hooks.onScoreboard(true); return; }
       if (k === 'KeyB') { this.hooks.onBuyMenu(); return; }
-      if (k === 'Escape') return;
+      if (k === 'Escape') { this.hooks.onEscape(); return; }
       if (this.hooks.isUiOpen() && !this.locked) return;
       if (['Space', 'ControlLeft', 'ControlRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(k) && this.locked) e.preventDefault();
       if (e.repeat) return;
@@ -110,7 +115,7 @@ export class Input {
       this.keys.delete(e.code);
       if (e.code === 'Tab') this.hooks.onScoreboard(false);
     });
-    this.on(window, 'blur', () => { this.keys.clear(); this.mouseBtn = 0; });
+    this.on(window, 'blur', () => { this.keys.clear(); this.mouseBtn = 0; this.hooks.onScoreboard(false); });
   }
 
   zoomScale = 1;

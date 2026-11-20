@@ -1,3 +1,5 @@
+import { type CrosshairCfg, DEFAULT_CROSSHAIR, sanitizeCrosshair } from './crosshair';
+
 export interface Settings {
   name: string;
   sens: number; // CS-like: graus = contagens * 0.022 * sens
@@ -15,7 +17,7 @@ export interface Settings {
   maxRounds: number;
   quality: 'auto' | 'low' | 'high';
   showFps: boolean;
-  crosshairColor: string;
+  xh: CrosshairCfg;
   invertY: boolean;
 }
 
@@ -38,16 +40,27 @@ export const DEFAULT_SETTINGS: Settings = {
   maxRounds: 24,
   quality: 'auto',
   showFps: true,
-  crosshairColor: '#4dff7a',
+  xh: { ...DEFAULT_CROSSHAIR },
   invertY: false,
 };
 
 export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const o = JSON.parse(raw);
+      const s: Settings = { ...DEFAULT_SETTINGS, ...o };
+      // migração: versões antigas só tinham a cor da mira (crosshairColor)
+      if (!o.xh && typeof o.crosshairColor === 'string' && /^#[0-9a-f]{6}$/i.test(o.crosshairColor)) {
+        const n = parseInt(o.crosshairColor.slice(1), 16);
+        s.xh = { ...DEFAULT_CROSSHAIR, color: 5, r: n >> 16, g: (n >> 8) & 255, b: n & 255 };
+      }
+      s.xh = sanitizeCrosshair(s.xh);
+      delete (s as any).crosshairColor;
+      return s;
+    }
   } catch { /* storage indisponível */ }
-  return { ...DEFAULT_SETTINGS };
+  return { ...DEFAULT_SETTINGS, xh: { ...DEFAULT_CROSSHAIR } };
 }
 
 export function saveSettings(s: Settings) {

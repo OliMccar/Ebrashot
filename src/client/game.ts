@@ -80,6 +80,7 @@ export class Game {
   private frameAvg = 16;
   private dprT = 0;
   private pauseEl: HTMLElement | null = null;
+  private pauseAt = 0;
   private clickEl: HTMLElement;
   private mobile: boolean;
   private team: Team | null = null;
@@ -97,13 +98,14 @@ export class Game {
     canvas.className = 'game-canvas';
     container.appendChild(canvas);
     // HUD antes do Input: o HUD limpa #hud e o Input acrescenta os controles touch
-    this.hud = new Hud(this.map, this.settings.forceMobile || isTouch(), this.settings.crosshairColor);
+    this.hud = new Hud(this.map, this.settings.forceMobile || isTouch(), () => this.settings.xh);
     this.input = new Input(canvas, this.settings, {
       onBuyMenu: () => this.toggleBuy(),
       onScoreboard: (s) => this.hud.showScore(s),
       onMenu: () => this.openPause(),
       onInspect: () => { if (this.predicted?.alive) this.vm.inspect(); },
       onSpectateNext: () => this.nextSpectate(),
+      onEscape: () => this.onEscape(),
       isUiOpen: () => this.hud.buyOpen || !!this.pauseEl,
     }, () => this.predicted);
     this.mobile = this.input.mobile;
@@ -667,6 +669,17 @@ export class Game {
       const sp = this.spectateId ? snap.players.find((p) => p.id === this.spectateId) : null;
       spectating = sp && sp.a ? `Assistindo: ${sp.n} · ${this.mobile ? 'toque em atirar' : 'clique'} para trocar` : 'Aguardando o próximo round';
     }
+    // mira: converte ângulos em pixels de tela usando o FOV atual
+    const focal = (window.innerHeight / 2) / Math.tan((this.camera.fov * DEG) / 2);
+    let spreadPx = 0, recoilX = 0, recoilY = 0, weaponGapPx = 0;
+    if (st && def) {
+      spreadPx = Math.tan(computeInaccuracy(st)) * focal;
+      weaponGapPx = Math.tan(def.spread.stand) * focal;
+      const [pp, py] = patternAt(def, st.recoilIdx);
+      recoilX = Math.tan(py * DEG - this.punchY) * focal;
+      recoilY = -Math.tan(pp * DEG - this.punchP) * focal;
+    }
+    const specActive = !alive && !!snap && !!this.spectateId && snap.players.some((p) => p.id === this.spectateId && p.a);
     this.frames++; this.fpsT += dt;
     if (this.fpsT >= 0.5) { this.fps = Math.round(this.frames / this.fpsT); this.frames = 0; this.fpsT = 0; }
     this.hud.update(dt, {
@@ -675,6 +688,7 @@ export class Game {
       inacc: st ? computeInaccuracy(st) : 0, scoped: !!st && st.scope > 0, alive,
       plantP: me?.plantP ?? 0, defuseP: me?.defuseP ?? 0, canBuy: !!me?.canBuy, hint, spectating,
       fps: this.settings.showFps ? this.fps : 0, ping: Math.round(this.conn.rtt),
+      spreadPx, recoilX, recoilY, weaponGapPx, specActive,
     }, snap);
     if (this.hud.buyOpen && me && snap && this.team) this.hud.renderBuy(this.team, me.money, me.armor, me.helmet, snap.round.buyLeft);
     if (this.hud.buyOpen && me && !me.canBuy) { this.hud.closeBuy(); this.relock(); }
@@ -687,7 +701,14 @@ export class Game {
     this.clickEl.classList.toggle('on', showClick);
   }
 
+  private onEscape() {
+    if (this.hud.buyOpen) { this.hud.closeBuy(); this.relock(); }
+    else if (this.pauseEl) { if (this.pauseEl.style.display !== 'none' && performance.now() - this.pauseAt > 300) this.closePause(); }
+    else this.openPause();
+  }
+
   private toggleBuy() {
+    if (this.pauseEl) return;
     if (this.hud.buyOpen) { this.hud.closeBuy(); this.relock(); return; }
     const me = this.me;
     if (!me || !this.team || !this.snap) return;
@@ -699,26 +720,37 @@ export class Game {
   // ---------------------------------------------------------------- pausa
   private openPause() {
     if (this.pauseEl || !this.running) return;
+    this.pauseAt = performance.now();
     this.hud.closeBuy();
     const el = document.createElement('div');
     el.className = 'menu-overlay pause';
-    el.innerHTML = `<div class="panel pause-panel">
-      <h2>Pausa</h2>
-      <button class="primary" data-a="resume">Continuar</button>
-      <button data-a="T">Entrar nos Terroristas (TR)</button>
-      <button data-a="CT">Entrar nos Contra-Terroristas (CT)</button>
-      <button data-a="settings">Configurações</button>
-      <button data-a="exit" class="danger">Sair para o menu</button>
-      ${this.conn.offline ? '' : `<p class="muted">Online · ping ${Math.round(this.conn.rtt)} ms</p>`}
-    </div>`;
+    const sc = this.snap?.round;
+    el.innerHTML = `<div class="pause-rail">
+        <div class="pr-logo">E<span>S</span></div>
+        <button class="pr-ico on" data-a="resume" title="Continuar">▶</button>
+        <button class="pr-ico" data-a="settings" title="Configurações">⚙</button>
+        <button class="pr-ico pr-exit" data-a="exit" title="Desconectar">⏻</button>
+      </div>
+      <div class="pause-panel">
+        <div class="pp-head">${this.conn.offline ? 'Partida offline · vs Bots' : `Online · ping ${Math.round(this.conn.rtt)} ms`}</div>
+        <div class="pp-score"><span class="T">TR ${sc?.sT ?? 0}</span><i>${sc ? `Round ${sc.round}/${sc.maxRounds}` : ''}</i><span class="CT">${sc?.sCT ?? 0} CT</span></div>
+        <button class="pp-btn primary" data-a="resume">Continuar partida</button>
+        <div class="pp-sep">Escolher time</div>
+        <div class="pp-teams">
+          <button class="pp-team T ${this.team === 'T' ? 'cur' : ''}" data-a="T"><b>Terroristas</b><small>${this.team === 'T' ? 'Seu time' : 'Entrar'}</small></button>
+          <button class="pp-team CT ${this.team === 'CT' ? 'cur' : ''}" data-a="CT"><b>Contra-Terroristas</b><small>${this.team === 'CT' ? 'Seu time' : 'Entrar'}</small></button>
+        </div>
+        <button class="pp-btn" data-a="settings">Configurações</button>
+        <button class="pp-btn danger" data-a="exit">Desconectar</button>
+      </div>`;
     document.getElementById('hud')!.appendChild(el);
     this.pauseEl = el;
     el.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
       b.onclick = () => {
         const a = b.dataset.a;
         if (a === 'resume') this.closePause();
-        if (a === 'T' || a === 'CT') { this.conn.setTeam(a); this.closePause(); }
-        if (a === 'settings') { el.style.display = 'none'; this.opts.onOpenSettings(() => { el.style.display = ''; this.audio.setVolume(this.settings.volume); }); }
+        if ((a === 'T' || a === 'CT') && a !== this.team) { this.conn.setTeam(a); this.closePause(); }
+        if (a === 'settings') { el.style.display = 'none'; this.opts.onOpenSettings(() => { el.style.display = ''; this.audio.setVolume(this.settings.volume); this.hud.setCrosshair(); }); }
         if (a === 'exit') this.exit();
       };
     });
