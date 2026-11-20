@@ -392,7 +392,7 @@ input.tgl:checked::after { transform: translateX(20px); background: #fff; }
 .bw-slice path { fill: rgba(22, 26, 30, .86); stroke: rgba(255, 255, 255, .1); stroke-width: 1; transition: fill .1s; }
 .bw-slice:hover path { fill: rgba(92, 158, 46, .82); stroke: rgba(255, 255, 255, .45); }
 .bw-slice text { text-anchor: middle; pointer-events: none; fill: #e9edf0; }
-.bw-label { font: 700 20px var(--cond); letter-spacing: 1px; text-transform: uppercase; }
+.bw-label { font: 700 var(--bw-font, 20px) var(--cond); letter-spacing: 1px; text-transform: uppercase; }
 .bw-sub { font: 600 15px var(--cond); fill: #8fd16a !important; }
 .bw-key { font: 700 14px var(--cond); fill: rgba(255, 255, 255, .45) !important; }
 .bw-slice.poor path { fill: rgba(22, 26, 30, .6); }

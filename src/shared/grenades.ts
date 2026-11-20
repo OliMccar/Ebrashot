@@ -53,7 +53,7 @@ export function stepGrenade(g: GrenadeProj, world: World, dt: number, onBounce: 
   const speed = Math.hypot(g.vel.x, g.vel.y, g.vel.z);
   switch (g.g) {
     case 'he': case 'flash': return g.age >= 1.6;
-    case 'smoke': return (g.age > 1.2 && speed < 0.25) || g.age > 6;
+    case 'smoke': case 'decoy': return (g.age > 1.2 && speed < 0.25) || g.age > 6;
     case 'molotov': return (g.floorHit && g.age > 0.05) || g.age > 2.5;
   }
 }

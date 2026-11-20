@@ -10,6 +10,14 @@ const POSE: Partial<Record<WeaponId, [number, number, number]>> = {
   glock: [0.11, -0.115, -0.36], usp: [0.11, -0.115, -0.36], deagle: [0.11, -0.12, -0.36],
   knife: [0.17, -0.15, -0.34], he: [0.13, -0.13, -0.27], flash: [0.13, -0.13, -0.27], smoke: [0.13, -0.13, -0.27],
   molotov: [0.13, -0.15, -0.27], c4: [0.02, -0.17, -0.3],
+  // bullpups: o corpo vai para trás da empunhadura, então ficam mais à frente e mais baixas
+  p90: [0.15, -0.2, -0.64], famas: [0.15, -0.205, -0.62], aug: [0.15, -0.21, -0.62],
+};
+
+/** Posição padrão por categoria (armas sem pose própria em POSE). */
+const CLASS_POSE: Partial<Record<string, [number, number, number]>> = {
+  pistol: [0.11, -0.115, -0.36], zeus: [0.11, -0.12, -0.34], smg: [0.12, -0.13, -0.3], rifle: [0.12, -0.14, -0.3],
+  shotgun: [0.12, -0.15, -0.32], lmg: [0.15, -0.2, -0.44], sniper: [0.14, -0.19, -0.42], grenade: [0.13, -0.13, -0.27],
 };
 
 /** Rotação base por arma (só a faca precisa: ponta para cima/dentro e lâmina inclinada). */
@@ -173,7 +181,7 @@ export class ViewModel {
     this.kickR.v += 9 * def.kick;
     if (!def.sound.suppressed) {
       this.flash.visible = true; this.flashT = 0.045;
-      this.flash.scale.setScalar((id === 'awp' ? 0.32 : 0.2) * (0.8 + Math.random() * 0.4));
+      this.flash.scale.setScalar((def.cls === 'sniper' || def.cls === 'shotgun' || def.cls === 'lmg' ? 0.32 : def.cls === 'smg' ? 0.17 : 0.2) * (0.8 + Math.random() * 0.4));
       this.flash.material.rotation = Math.random() * 6;
     }
     this.inspectT = -1;
@@ -196,7 +204,7 @@ export class ViewModel {
     const def = WEAPONS[st.weapon];
     this.holder.visible = extra.visible && st.scope === 0;
     if (!this.holder.visible) return;
-    const base = POSE[st.weapon] ?? [0.12, -0.13, -0.25];
+    const base = POSE[st.weapon] ?? CLASS_POSE[def.cls] ?? [0.12, -0.13, -0.25];
     const speed = Math.hypot(st.vel.x, st.vel.z);
     const sp = Math.min(1, speed / 6) * (st.onGround ? 1 : 0.2) * this.bob;
     this.bobT += dt * (6 + speed * 1.2) * (st.onGround ? 1 : 0.2);

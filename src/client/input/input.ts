@@ -126,7 +126,7 @@ export class Input {
     let id: WeaponId | undefined;
     if (slot === 0) id = st.inv.primary?.id;
     else if (slot === 1) id = st.inv.secondary?.id;
-    else if (slot === 2) id = 'knife';
+    else if (slot === 2) id = st.weapon === 'knife' && (st.inv.zeus ?? 0) > 0 ? 'zeus' : 'knife'; // 3 alterna faca ↔ Zeus
     else if (slot === 3) {
       const owned = GRENADES.filter((g) => st.inv.nades[g] > 0);
       if (!owned.length) return;
@@ -152,6 +152,7 @@ export class Input {
     if (st.inv.primary) l.push(st.inv.primary.id);
     if (st.inv.secondary) l.push(st.inv.secondary.id);
     l.push('knife');
+    if ((st.inv.zeus ?? 0) > 0) l.push('zeus');
     for (const g of GRENADES) if (st.inv.nades[g] > 0) l.push(g);
     if (st.inv.c4) l.push('c4');
     return l;
@@ -360,7 +361,7 @@ export class Input {
     const el = this.els.get('weapons');
     if (!el || !st) return;
     const spans = el.querySelectorAll('span');
-    const names = [st.inv.primary?.id, st.inv.secondary?.id, 'knife', GRENADES.find((g) => st.inv.nades[g] > 0), st.inv.c4 ? 'c4' : undefined];
+    const names = [st.inv.primary?.id, st.inv.secondary?.id, st.weapon === 'zeus' ? 'zeus' : 'knife', GRENADES.find((g) => st.inv.nades[g] > 0), st.inv.c4 ? 'c4' : undefined];
     spans.forEach((s, i) => {
       const id = names[i] as WeaponId | undefined;
       const txt = id ? WEAPONS[id].name.replace('Granada ', '') : '—';

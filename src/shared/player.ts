@@ -6,7 +6,7 @@ import {
 import type { V3 } from './math';
 import { DEG, clamp, dirFromAngles, hash2, lerp, mulberry32, raySphereLocal } from './math';
 import type { GrenadeId, WeaponId } from './weapons';
-import { GRENADES, WEAPONS, patternAt } from './weapons';
+import { GRENADES, WEAPONS, emptyNades, patternAt } from './weapons';
 import type { World } from './world';
 import { rayBox } from './world';
 
@@ -16,6 +16,8 @@ export interface Inventory {
   secondary: WeaponSlotState | null;
   nades: Record<GrenadeId, number>;
   c4: boolean;
+  /** Zeus x27 (taser de 1 carga) */
+  zeus: number;
 }
 
 export interface PlayerState {
@@ -59,7 +61,7 @@ export interface Cmd {
 }
 
 export type Intent =
-  | { type: 'shot'; origin: V3; dir: V3; weapon: WeaponId; recoil: number }
+  | { type: 'shot'; origin: V3; dir: V3; weapon: WeaponId; recoil: number; pellet?: number }
   | { type: 'melee'; heavy: boolean; origin: V3; dir: V3 }
   | { type: 'throw'; g: GrenadeId; origin: V3; vel: V3 }
   | { type: 'dry' }
@@ -76,7 +78,7 @@ export function createPlayerState(id: number): PlayerState {
   return {
     id, pos: { x: 0, y: 0, z: 0 }, vel: { x: 0, y: 0, z: 0 }, onGround: true, duck: 0, yaw: 0, pitch: 0,
     weapon: 'knife', lastWeapon: 'knife',
-    inv: { primary: null, secondary: null, nades: { he: 0, flash: 0, smoke: 0, molotov: 0 }, c4: false },
+    inv: { primary: null, secondary: null, nades: emptyNades(), c4: false, zeus: 0 },
     deployT: 0, nextFireT: 0, reloadT: 0, throwT: 0, throwStrength: 1, scope: 0, rescope: 0,
     recoilIdx: 0, shotInacc: 0, sinceShot: 10, shots: 0, prevBtn: 0, frozen: false, busy: false, alive: true,
   };
@@ -89,7 +91,7 @@ export function clonePlayerState(p: PlayerState): PlayerState {
     inv: {
       primary: p.inv.primary ? { ...p.inv.primary } : null,
       secondary: p.inv.secondary ? { ...p.inv.secondary } : null,
-      nades: { ...p.inv.nades }, c4: p.inv.c4,
+      nades: { ...p.inv.nades }, c4: p.inv.c4, zeus: p.inv.zeus ?? 0,
     },
   };
 }
@@ -108,6 +110,7 @@ export const eyePos = (p: PlayerState): V3 => ({ x: p.pos.x, y: p.pos.y + eyeHei
 export function hasWeapon(p: PlayerState, id: WeaponId): boolean {
   if (id === 'knife') return true;
   if (id === 'c4') return p.inv.c4;
+  if (id === 'zeus') return (p.inv.zeus ?? 0) > 0;
   if (p.inv.primary?.id === id || p.inv.secondary?.id === id) return true;
   if ((GRENADES as string[]).includes(id)) return p.inv.nades[id as GrenadeId] > 0;
   return false;
@@ -350,6 +353,17 @@ function stepWeapon(p: PlayerState, cmd: Cmd, pressed: number, emit?: Emit) {
   }
   if (def.id === 'c4') return;
 
+  if (def.id === 'zeus') {
+    if ((pressed & BTN_FIRE) && p.nextFireT <= 0 && p.deployT <= 0 && (p.inv.zeus ?? 0) > 0) {
+      p.inv.zeus = 0;
+      p.nextFireT = def.fireInterval;
+      p.sinceShot = 0;
+      emit?.({ type: 'shot', origin: eyePos(p), dir: dirFromAngles(p.yaw, p.pitch), weapon: 'zeus', recoil: 0 });
+      switchWeapon(p, bestWeapon(p));
+    }
+    return;
+  }
+
   if (def.id === 'knife') {
     if ((btn & (BTN_FIRE | BTN_ALT)) && p.nextFireT <= 0 && p.deployT <= 0) {
       const heavy = !(btn & BTN_FIRE);
@@ -390,8 +404,19 @@ function stepWeapon(p: PlayerState, cmd: Cmd, pressed: number, emit?: Emit) {
   p.shotInacc += def.spread.fire;
   p.sinceShot = 0;
   p.nextFireT = p.nextFireT > -DT ? p.nextFireT + def.fireInterval : def.fireInterval;
-  if (p.scope > 0 && def.id === 'awp') { p.rescope = p.scope; p.scope = 0; }
-  emit?.({ type: 'shot', origin: eyePos(p), dir, weapon: def.id, recoil: p.recoilIdx });
+  if (p.scope > 0 && def.bolt) { p.rescope = p.scope; p.scope = 0; }
+  const origin = eyePos(p);
+  emit?.({ type: 'shot', origin, dir, weapon: def.id, recoil: p.recoilIdx, pellet: 0 });
+  if (def.pellets && def.pellets > 1) {
+    const cone = def.pelletSpread ?? 0.06;
+    for (let k = 1; k < def.pellets; k++) {
+      const a = rng() * Math.PI * 2, r = Math.sqrt(rng()) * cone;
+      const ex = Math.cos(a) * r, ey = Math.sin(a) * r;
+      const pd = { x: dir.x + right.x * ex + up.x * ey, y: dir.y + right.y * ex + up.y * ey, z: dir.z + right.z * ex + up.z * ey };
+      const pl = Math.hypot(pd.x, pd.y, pd.z);
+      emit?.({ type: 'shot', origin, dir: { x: pd.x / pl, y: pd.y / pl, z: pd.z / pl }, weapon: def.id, recoil: p.recoilIdx, pellet: k });
+    }
+  }
 }
 
 // ---------------------------------------------------------------- hitboxes

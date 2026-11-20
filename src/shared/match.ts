@@ -13,7 +13,7 @@ import {
   createPlayerState, emptyCmd, extractPlayerState, eyeHeight, eyePos, hitTestPlayer, slotState, stepPlayer, switchWeapon,
 } from './player';
 import type { GameEvent, Phase, PlayerNet, Snapshot } from './protocol';
-import { type BuyItemId, type GrenadeId, type WeaponId, GRENADES, MAX_GRENADES, MAX_GRENADES_TOTAL, WEAPONS, priceFor } from './weapons';
+import { type BuyItemId, type GrenadeId, type WeaponId, GRENADES, MAX_GRENADES, MAX_GRENADES_TOTAL, WEAPONS, emptyNades, priceFor } from './weapons';
 import { World, resistOf } from './world';
 
 export interface ServerPlayer extends PlayerState {
@@ -73,6 +73,8 @@ export class Match {
   lossStreak: Record<Team, number> = { T: 0, CT: 0 };
   bomb = { st: 'none' as 'none' | 'carried' | 'dropped' | 'planted' | 'defused' | 'exploded', pos: { x: 0, y: 0, z: 0 } as V3, site: '' as 'A' | 'B' | '', left: 0, carrier: 0, defuser: 0, itemId: 0 };
   grenades: GrenadeProj[] = [];
+  /** decoys no chão imitando tiros da arma do dono */
+  decoys: { id: number; pos: V3; w: WeaponId; owner: number; team: Team; end: number; next: number; burst: number }[] = [];
   smokes: Smoke[] = [];
   fires: Fire[] = [];
   items: Item[] = [];
@@ -157,7 +159,7 @@ export class Match {
 
   private giveDefaults(p: ServerPlayer, strip: boolean) {
     if (strip) {
-      p.inv.primary = null; p.inv.secondary = null; p.inv.nades = { he: 0, flash: 0, smoke: 0, molotov: 0 }; p.inv.c4 = false;
+      p.inv.primary = null; p.inv.secondary = null; p.inv.nades = emptyNades(); p.inv.c4 = false; p.inv.zeus = 0;
       p.armor = 0; p.helmet = false; p.kit = false;
     }
     if (!p.inv.secondary) {
@@ -190,7 +192,7 @@ export class Match {
     this.phase = 'freeze';
     this.phaseLeft = this.freezeTime;
     this.roundElapsed = 0;
-    this.grenades = []; this.smokes = []; this.fires = []; this.items = []; this.noises = [];
+    this.grenades = []; this.decoys = []; this.smokes = []; this.fires = []; this.items = []; this.noises = [];
     this.bomb = { st: 'none', pos: { x: 0, y: 0, z: 0 }, site: '', left: 0, carrier: 0, defuser: 0, itemId: 0 };
     this.plan.site = Math.random() < 0.5 ? 'A' : 'B';
     for (const p of this.players.values()) {
@@ -293,6 +295,9 @@ export class Match {
         const total = GRENADES.reduce((s, x) => s + p.inv.nades[x], 0);
         if (p.inv.nades[g] >= MAX_GRENADES[g] || total >= MAX_GRENADES_TOTAL) return fail('Limite de granadas');
         p.inv.nades[g]++;
+      } else if (item === 'zeus') {
+        if ((p.inv.zeus ?? 0) > 0) return fail('Já possui Zeus');
+        p.inv.zeus = 1;
       } else if (def.slot === 0 || def.slot === 1) {
         const key = def.slot === 0 ? 'primary' : 'secondary';
         const cur = p.inv[key];
@@ -338,6 +343,7 @@ export class Match {
 
     this.recordHistory();
     this.stepGrenades();
+    this.stepDecoys();
     this.stepFires();
     for (const s of this.smokes) s.age += DT;
     this.smokes = this.smokes.filter((s) => s.age < s.life);
@@ -448,7 +454,7 @@ export class Match {
   // ------------------------------------------------------------ combate
   private handleIntent(p: ServerPlayer, i: Intent, cmd: Cmd) {
     switch (i.type) {
-      case 'shot': this.processShot(p, i.origin, i.dir, i.weapon, cmd.rt); break;
+      case 'shot': this.processShot(p, i.origin, i.dir, i.weapon, cmd.rt, i.pellet ?? 0); break;
       case 'melee': this.processMelee(p, i.origin, i.dir, i.heavy); break;
       case 'throw': {
         this.grenades.push({ id: this.nextEnt++, g: i.g, owner: p.id, team: p.team, pos: { ...i.origin }, vel: { ...i.vel }, age: 0, floorHit: false });
@@ -480,9 +486,9 @@ export class Match {
     return cur;
   }
 
-  private processShot(p: ServerPlayer, origin: V3, dir: V3, wid: WeaponId, rt: number) {
+  private processShot(p: ServerPlayer, origin: V3, dir: V3, wid: WeaponId, rt: number, pellet = 0) {
     const def = WEAPONS[wid];
-    this.noises.push({ pos: { ...origin }, time: this.time, id: p.id, team: p.team });
+    if (!pellet) this.noises.push({ pos: { ...origin }, time: this.time, id: p.id, team: p.team });
     const poses = this.posesFor(p, rt);
     const hits: { t: number; group: number; id: number }[] = [];
     for (const [id, pose] of poses) {
@@ -525,7 +531,7 @@ export class Match {
       break;
     }
     if (!stopped) passSegsUntil(def.range);
-    this.broadcast({ e: 'shot', id: p.id, w: wid, o: { ...origin }, end: at(Math.min(endT, def.range)), sup: !!WEAPONS[wid].sound.suppressed });
+    this.broadcast({ e: 'shot', id: p.id, w: wid, o: { ...origin }, end: at(Math.min(endT, def.range)), sup: !!WEAPONS[wid].sound.suppressed, ...(pellet ? { pi: pellet } : {}) });
   }
 
   private processMelee(p: ServerPlayer, origin: V3, dir: V3, heavy: boolean) {
@@ -594,7 +600,7 @@ export class Match {
     if (p.inv.c4) this.dropWeapon(p, 'c4');
     const best = p.inv.primary ?? p.inv.secondary;
     if (best) this.dropWeapon(p, best.id);
-    p.inv.primary = null; p.inv.secondary = null; p.inv.nades = { he: 0, flash: 0, smoke: 0, molotov: 0 };
+    p.inv.primary = null; p.inv.secondary = null; p.inv.nades = emptyNades(); p.inv.zeus = 0;
     p.armor = 0; p.helmet = false; p.kit = false;
   }
 
@@ -706,6 +712,11 @@ export class Match {
         this.broadcast({ e: 'det', g: 'smoke', p: sp });
         break;
       }
+      case 'decoy': {
+        const w: WeaponId = owner?.inv.primary?.id ?? owner?.inv.secondary?.id ?? (g.team === 'T' ? 'glock' : 'usp');
+        this.decoys.push({ id: this.nextEnt++, pos, w, owner: g.owner, team: g.team, end: this.time + 15, next: this.time + 0.4, burst: 0 });
+        break;
+      }
       case 'molotov': {
         const hit = this.world.raycast({ x: pos.x, y: pos.y + 0.1, z: pos.z }, { x: 0, y: -1, z: 0 }, 4);
         const fp = { x: pos.x, y: hit ? pos.y + 0.1 - hit.t : pos.y, z: pos.z };
@@ -715,6 +726,24 @@ export class Match {
         this.fires.push({ id: this.nextEnt++, pos: fp, r: 3.2, age: 0, life: 7, owner: g.owner, team: g.team });
         break;
       }
+    }
+  }
+
+  /** Decoy: rajadas aleatórias com o som da arma do dono; no fim, um estalo. */
+  private stepDecoys() {
+    for (let i = this.decoys.length - 1; i >= 0; i--) {
+      const d = this.decoys[i];
+      if (this.time >= d.end) {
+        this.decoys.splice(i, 1);
+        this.broadcast({ e: 'det', g: 'decoy', p: { ...d.pos } });
+        continue;
+      }
+      if (this.time < d.next) continue;
+      const def = WEAPONS[d.w];
+      this.broadcast({ e: 'decoy', p: { x: r2(d.pos.x), y: r2(d.pos.y), z: r2(d.pos.z) }, w: d.w });
+      this.noises.push({ pos: { ...d.pos }, time: this.time, id: d.owner, team: d.team });
+      if (d.burst > 0) { d.burst--; d.next = this.time + Math.max(0.09, def.fireInterval); }
+      else { d.burst = def.auto ? Math.floor(Math.random() * 4) : Math.floor(Math.random() * 2); d.next = this.time + 0.5 + Math.random() * 1.6; }
     }
   }
 
@@ -804,7 +833,10 @@ export class Match {
         flashEnd: Math.max(0, me.flashEnd - this.time),
       } : null,
       players,
-      gr: this.grenades.map((g) => ({ id: g.id, g: g.g, x: r2(g.pos.x), y: r2(g.pos.y), z: r2(g.pos.z) })),
+      gr: [
+        ...this.grenades.map((g) => ({ id: g.id, g: g.g, x: r2(g.pos.x), y: r2(g.pos.y), z: r2(g.pos.z) })),
+        ...this.decoys.map((d) => ({ id: d.id, g: 'decoy' as GrenadeId, x: r2(d.pos.x), y: r2(d.pos.y), z: r2(d.pos.z) })),
+      ],
       sm: this.smokes.map((s) => ({ id: s.id, x: r2(s.pos.x), y: r2(s.pos.y), z: r2(s.pos.z), age: r2(s.age), life: s.life })),
       fi: this.fires.map((f) => ({ id: f.id, x: r2(f.pos.x), y: r2(f.pos.y), z: r2(f.pos.z), r: f.r, age: r2(f.age), life: f.life })),
       it: this.items.map((i) => ({ id: i.id, w: i.w, x: r2(i.pos.x), y: r2(i.pos.y), z: r2(i.pos.z), yw: r2(i.yaw) })),

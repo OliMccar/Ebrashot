@@ -7,7 +7,7 @@ import { isTouch, requestGyroPermission } from './input/input';
 import { MenuScene } from './menuScene';
 import { LocalConnection, WsConnection, defaultServerUrl, listRooms } from './net';
 import type { Team } from '../shared/constants';
-import { type WeaponId, WEAPONS } from '../shared/weapons';
+import { SHOP, type WeaponId, WEAPONS } from '../shared/weapons';
 import { type GfxPreset, GFX_CORE_KEYS, type Settings, applyGfxPreset, loadSettings, saveSettings } from './settings';
 
 const settings: Settings = loadSettings();
@@ -40,10 +40,16 @@ function show(id: string) {
 }
 
 // ----------------------------------------------------------- personagem 3D do menu
-const AGENT_WEAPONS: Record<Team, WeaponId[]> = {
-  T: ['ak47', 'awp', 'deagle', 'glock', 'knife'],
-  CT: ['m4a1', 'awp', 'deagle', 'usp', 'knife'],
+/** Todas as armas de fogo que o time pode comprar (rifles primeiro), mais a faca. */
+const agentList = (t: Team): WeaponId[] => {
+  const order = ['rifle', 'sniper', 'smg', 'shotgun', 'lmg', 'pistol'];
+  const guns = SHOP.filter((s) => s.id in WEAPONS && (!s.team || s.team === t)).map((s) => s.id as WeaponId)
+    .filter((id) => order.includes(WEAPONS[id].cls))
+    .sort((a, b) => order.indexOf(WEAPONS[a].cls) - order.indexOf(WEAPONS[b].cls));
+  const lead: WeaponId = t === 'T' ? 'ak47' : 'm4a1';
+  return [lead, ...guns.filter((g) => g !== lead), 'knife'];
 };
+const AGENT_WEAPONS: Record<Team, WeaponId[]> = { T: agentList('T'), CT: agentList('CT') };
 const SWAP: Partial<Record<WeaponId, WeaponId>> = { ak47: 'm4a1', m4a1: 'ak47', glock: 'usp', usp: 'glock' };
 let menuScene: MenuScene | null = null;
 let sceneFailed = false;

@@ -113,7 +113,8 @@ export class BotBrain {
       cmd.pitch = this.aimPitch - pp * DEG * this.p.comp;
       const err = Math.abs(angleDiff(this.aimYaw, ang.yaw)) + Math.abs(this.aimPitch - ang.pitch);
       const tol = Math.atan2(0.32, Math.max(1, d)) + 0.012 + this.p.err;
-      const isRifle = def.slot === 0;
+      const isRifle = def.slot === 0 && def.auto;
+      const isShotgun = def.cls === 'shotgun';
       if (me.weapon === 'knife') {
         moveDir = { x: tgt.pos.x - me.pos.x, y: 0, z: tgt.pos.z - me.pos.z };
         if (d < 2 && err < 0.4) fire = true;
@@ -122,7 +123,7 @@ export class BotBrain {
         moveDir = { x: me.pos.x - tgt.pos.x, y: 0, z: me.pos.z - tgt.pos.z }; // recua
       } else {
         if (!reacting && err < tol * 1.6) {
-          if (me.weapon === 'awp') {
+          if (def.cls === 'sniper') {
             if (me.scope === 0 && d > 5 && me.deployT <= 0 && me.rescope === 0) alt = true;
             wantStop = true;
             if ((me.scope > 0 || d <= 5) && Math.hypot(me.vel.x, me.vel.z) < 1.2 && err < tol) fire = true;
@@ -134,6 +135,10 @@ export class BotBrain {
             } else fire = true;
             wantStop = d > 7;
             crouch = d > 24 && this.diff >= 2;
+          } else if (isShotgun) {
+            // escopeta: só atira de perto, e se aproxima quando está longe
+            if (d < 14) fire = !this.prevFire && me.nextFireT <= 0;
+            else wantStop = false;
           } else {
             fire = !this.prevFire && me.nextFireT <= 0; // toques
           }
@@ -146,7 +151,8 @@ export class BotBrain {
           moveDir = { x: r.x * this.strafeDir, y: 0, z: r.z * this.strafeDir };
           if (me.hp < 35 && this.diff >= 1) { const f = dirFromAngles(this.aimYaw, 0); moveDir.x -= f.x; moveDir.z -= f.z; }
         }
-        if (fire && (isRifle || me.weapon === 'awp')) moveDir = null; // counter-strafe: para para atirar
+        if (fire && (isRifle || def.cls === 'sniper')) moveDir = null; // counter-strafe: para para atirar
+        if (isShotgun && d >= 14) moveDir = { x: tgt.pos.x - me.pos.x, y: 0, z: tgt.pos.z - me.pos.z };
       }
       // granada de oportunidade com alvo visível de média distância
       if (!fire && d > 9 && d < 24 && this.nadeCooldown <= 0 && (me.inv.nades.he > 0 || me.inv.nades.molotov > 0)) this.startNade(me, tgt.pos);
@@ -363,28 +369,55 @@ export class BotBrain {
   }
 }
 
-/** Lógica de compra dos bots baseada no dinheiro disponível. */
+/** Sorteia um item de uma lista com pesos. */
+function pick<T>(opts: [T, number][]): T {
+  const total = opts.reduce((t, o) => t + o[1], 0);
+  let r = Math.random() * total;
+  for (const [v, w] of opts) { r -= w; if (r <= 0) return v; }
+  return opts[0][0];
+}
+
+/** Lógica de compra dos bots: rodada de pistola, eco, compra forçada ou compra completa, com variedade de armas. */
 export function botBuy(m: Match, p: ServerPlayer) {
   const r = Math.random();
-  const rifle: WeaponId = p.team === 'T' ? 'ak47' : 'm4a1';
-  const rifleP = WEAPONS[rifle].price;
+  const T = p.team === 'T';
   const isPistolRound = m.round === 1 || m.round === Math.floor(m.maxRounds / 2) + 1;
+  const buyPistol = (opts: [WeaponId, number][]) => {
+    const id = pick(opts);
+    if (p.money >= WEAPONS[id].price) m.buy(p.id, id);
+  };
   if (isPistolRound) {
-    if (r < 0.5) m.buy(p.id, 'vest');
-    else if (r < 0.75) { m.buy(p.id, 'flash'); m.buy(p.id, 'he'); }
-    else if (p.team === 'CT') m.buy(p.id, 'kit');
+    if (r < 0.35) m.buy(p.id, 'vest');
+    else if (r < 0.6) buyPistol(T ? [['p250', 3], ['tec9', 2], ['elite', 1]] : [['p250', 3], ['fiveseven', 2], ['p2000', 1]]);
+    else if (r < 0.8) { m.buy(p.id, 'flash'); m.buy(p.id, 'he'); }
+    else if (!T) m.buy(p.id, 'kit');
+    else m.buy(p.id, 'zeus');
     return;
   }
   if (!p.inv.primary) {
-    if (p.money >= 4750 + 1000 && r < 0.18) m.buy(p.id, 'awp');
-    else if (p.money >= rifleP + 650) m.buy(p.id, rifle);
-    else if (p.money >= rifleP && r < 0.4) m.buy(p.id, rifle);
-    else if (p.money >= 1700 && r < 0.4) m.buy(p.id, 'deagle');
+    const rifles: [WeaponId, number][] = T
+      ? [['ak47', 6], ['sg553', 1.2], ['galil', 1.2]]
+      : [['m4a1', 3], ['m4a1s', 3], ['aug', 1], ['famas', 1]];
+    const want = pick(rifles);
+    if (p.money >= 4750 + 1000 && r < 0.14) m.buy(p.id, 'awp');
+    else if (p.money >= 5000 + 1000 && r < 0.18) m.buy(p.id, T ? 'g3sg1' : 'scar20');
+    else if (p.money >= WEAPONS[want].price + 650) m.buy(p.id, want);
+    else if (p.money >= 1700 + 650 && r < 0.25) m.buy(p.id, 'ssg08');
+    else if (p.money >= 1800 && r < 0.55) m.buy(p.id, T ? 'galil' : 'famas');
+    else if (p.money >= 1500 && r < 0.75) {
+      // compra forçada: SMG ou escopeta
+      m.buy(p.id, pick<WeaponId>(T
+        ? [['mac10', 3], ['mp7', 2], ['ump45', 2], ['mp5sd', 1], ['bizon', 1], ['nova', 1], ['sawedoff', 1]]
+        : [['mp9', 3], ['mp7', 2], ['ump45', 2], ['mp5sd', 1], ['bizon', 1], ['nova', 1], ['mag7', 1]]));
+    } else if (p.money >= 1100 && r < 0.4) m.buy(p.id, T ? 'mac10' : 'mp9');
+    else if (p.money >= 700) buyPistol([['deagle', 3], [T ? 'tec9' : 'fiveseven', 2], ['p250', 1], ['r8', 0.3]]);
   }
   if (p.inv.primary) {
     if (p.money >= 1000) m.buy(p.id, 'vesthelm'); else if (p.money >= 650) m.buy(p.id, 'vest');
-    if (p.team === 'CT' && p.money >= 400) m.buy(p.id, 'kit');
+    if (!T && p.money >= 400) m.buy(p.id, 'kit');
     const nades: GrenadeId[] = ['smoke', 'flash', 'he', 'molotov'];
     for (const g of nades) if (p.money >= 900 && Math.random() < 0.6) m.buy(p.id, g);
+    if (p.money >= 1500 && Math.random() < 0.15) m.buy(p.id, 'decoy');
+    if (p.money >= 2500 && Math.random() < 0.1) m.buy(p.id, 'zeus');
   }
 }

@@ -551,8 +551,10 @@ export class Game {
       let o = this.nades.get(g.id);
       if (!o) { o = buildWeaponCached(g.g).root; o.scale.setScalar(1.3); this.scene.add(o); this.nades.set(g.id, o); }
       const p = this.interpNade(g.id) ?? latest.gr.get(g.id)!;
+      // só gira enquanto voa (a decoy no chão fica parada)
+      const moving = Math.hypot(p.x - o.position.x, p.y - o.position.y, p.z - o.position.z) > 0.002;
       o.position.set(p.x, p.y, p.z);
-      o.rotation.x += dt * 9; o.rotation.z += dt * 5;
+      if (moving) { o.rotation.x += dt * 9; o.rotation.z += dt * 5; }
     }
     for (const [id, o] of this.nades) if (!gseen.has(id)) { this.scene.remove(o); this.nades.delete(id); }
 
@@ -614,8 +616,9 @@ export class Game {
     switch (i.type) {
       case 'shot': {
         const def = WEAPONS[i.weapon];
-        this.audio.gunshot(def);
-        this.vm.onFire(i.weapon);
+        const pellet = i.pellet ?? 0;
+        // escopetas: som, coice e clarão só no primeiro chumbo
+        if (!pellet) { this.audio.gunshot(def); this.vm.onFire(i.weapon); }
         const wall = this.world.raycast(i.origin, i.dir, def.range);
         let end = wall ? wall.t : def.range;
         let hitPlayer = false;
@@ -634,8 +637,8 @@ export class Game {
           this.effects.impact(p, wall.normal, mat);
           this.audio.impact(mat, p);
         }
-        if (def.slot <= 1 && Math.random() < (def.id === 'awp' ? 1 : 0.55)) this.effects.tracer(this.muzzleWorld(), p);
-        if (this.effects.light && this.effects.lightsOn && !def.sound.suppressed) this.effects.muzzle(this.muzzleWorld(), 0.01);
+        if (def.slot <= 1 && pellet < 3 && Math.random() < (def.cls === 'sniper' ? 1 : 0.55)) this.effects.tracer(this.muzzleWorld(), p);
+        if (!pellet && this.effects.light && this.effects.lightsOn && !def.sound.suppressed) this.effects.muzzle(this.muzzleWorld(), 0.01);
         break;
       }
       case 'melee': this.vm.onMelee(i.heavy); this.audio.knife(false); break;
@@ -702,9 +705,10 @@ export class Game {
         const m = this.models.get(e.id);
         let mz = e.o;
         if (m?.weapon) { const v = new THREE.Vector3(); m.weapon.muzzle.getWorldPosition(v); mz = { x: v.x, y: v.y, z: v.z }; }
-        if (!def.sound.suppressed) this.effects.muzzle(mz, e.w === 'awp' ? 0.9 : 0.6);
-        if (Math.random() < 0.6 || e.w === 'awp') this.effects.tracer(mz, e.end);
-        this.audio.gunshot(def, e.o);
+        const pi = e.pi ?? 0;
+        if (!pi && !def.sound.suppressed) this.effects.muzzle(mz, def.cls === 'sniper' || def.cls === 'shotgun' ? 0.9 : 0.6);
+        if (pi < 3 && (Math.random() < 0.6 || def.cls === 'sniper')) this.effects.tracer(mz, e.end);
+        if (!pi) this.audio.gunshot(def, e.o);
         this.bulletWhiz(e.o, e.end);
         if (e.id === this.specId()) { this.vm.onFire(e.w); if (this.specVm) this.specVm.reloadT = 0; }
         break;
@@ -747,11 +751,13 @@ export class Game {
           if (amp > 0) { this.shakeT = big ? 1.2 : 0.6; this.shakeAmp = amp; }
         } else if (e.g === 'flash') { this.effects.flashPop(e.p); this.audio.flashPop(e.p); }
         else if (e.g === 'smoke') this.audio.smokeHiss(e.p);
+        else if (e.g === 'decoy') { this.audio.bounce(e.p); this.effects.burst(e.p, { x: 0, y: 1, z: 0 }, 0xffd080, 10, 2.5, 0.04, 0.35, 6, 1); }
         else if (e.g === 'molotov') { this.audio.molotov(e.p); this.effects.burst(e.p, { x: 0, y: 1, z: 0 }, 0xff8a20, 20, 4, 0.06, 0.5, 4, 2); }
         break;
       }
       case 'flash': if (e.id === you) { this.hud.flash(e.dur); this.audio.flashRing(e.dur); } break;
       case 'bounce': this.audio.bounce(e.p); break;
+      case 'decoy': this.audio.gunshot(WEAPONS[e.w], e.p); break;
       case 'reload': if (e.id === this.specId() && this.specVm) this.specVm.reloadT = WEAPONS[e.w].reloadTime;
         if (e.id !== you) { const p = this.posOf(e.id); this.audio.reload(0, p); setTimeout(() => this.audio.reload(1, p), 900); } break;
       case 'planted': this.hud.banner('A BOMBA FOI PLANTADA', 'bomb', 3); this.audio.jingle('planted'); this.beepT = 0; break;

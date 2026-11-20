@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import { buildCatalogWeapon } from './weaponCatalog';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Team } from '../../shared/constants';
-import type { WeaponId } from '../../shared/weapons';
+import { type WeaponId, WEAPONS } from '../../shared/weapons';
 
 /** Material único com cores por vértice: um draw call por peça mesclada. */
 export const VC_MAT = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -247,6 +248,12 @@ export function buildWeapon(id: WeaponId): WeaponModel {
       muzzle.position.set(0, 0, -0.1);
       break;
     }
+    default:
+      buildCatalogWeapon(id, {
+        g, mg, sg, muzzle, support,
+        setMag: (p) => { magPos = p; },
+        setSlide: (p) => { slidePos = p; },
+      });
   }
   root.add(g.mesh());
   if (mg.parts.length) { const m = mg.mesh(); m.position.set(...magPos); root.add(m); mag = m; }
@@ -324,12 +331,12 @@ function solveArm(arm: Arm, target: THREE.Vector3, pole: THREE.Vector3) {
 
 type Hold = { pos: [number, number, number]; rot: [number, number, number]; twoHands: boolean; support?: [number, number, number] };
 
-const RIFLES: WeaponId[] = ['ak47', 'm4a1', 'awp'];
-const PISTOLS: WeaponId[] = ['glock', 'usp', 'deagle'];
 
 /** Onde fica o cabo da arma (mão direita) e sua rotação, por estilo e tipo de arma. Espaço do tronco; frente = -Z. */
 function holdFor(id: WeaponId | '', style: HoldStyle): Hold {
-  const rifle = RIFLES.includes(id as WeaponId), pistol = PISTOLS.includes(id as WeaponId);
+  const cls = id ? WEAPONS[id].cls : 'knife';
+  const rifle = cls === 'rifle' || cls === 'sniper' || cls === 'smg' || cls === 'shotgun' || cls === 'lmg';
+  const pistol = cls === 'pistol' || cls === 'zeus';
   if (style === 'aim') {
     if (rifle) return { pos: [0.06, 0.44, -0.4], rot: [0, 0, 0], twoHands: true };
     if (pistol) return { pos: [0.02, 0.44, -0.56], rot: [0, 0, 0], twoHands: true };

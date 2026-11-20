@@ -1,6 +1,6 @@
 import type { Mat } from '../shared/map';
 import type { V3 } from '../shared/math';
-import type { WeaponDef, WeaponId } from '../shared/weapons';
+import { type WeaponDef, type WeaponId, WEAPONS } from '../shared/weapons';
 
 /**
  * Áudio 100% procedural (Web Audio API).
@@ -262,7 +262,14 @@ export class GameAudio {
 
   /** Mecânica da arma do próprio jogador: ferrolho, cápsulas caindo. */
   private weaponMech(id: WeaponId, dst: AudioNode, g: number) {
-    if (id === 'awp') {
+    const def = WEAPONS[id];
+    if (def.cls === 'shotgun' && !def.auto) {
+      // bomba da escopeta: puxa e empurra
+      this.burst(dst, 'bandpass', 900, 1.5, 0.35, 0.01, 0.08, 1600, 0.32);
+      this.click(dst, 1800, 0.35, 0.36);
+      this.burst(dst, 'bandpass', 1300, 1.5, 0.3, 0.01, 0.07, 700, 0.46);
+      this.click(dst, 2200, 0.4, 0.5);
+    } else if (def.bolt) {
       // ferrolho: abre, puxa, empurra, fecha
       this.click(dst, 2400, 0.3, 0.55);
       this.burst(dst, 'bandpass', 1800, 2, 0.18, 0.02, 0.09, 3200, 0.6);
@@ -272,10 +279,10 @@ export class GameAudio {
       this.click(dst, rnd(2600, 3400), 0.12 * g, 0.018);
     }
     // cápsula batendo no chão
-    if (id !== 'knife' && Math.random() < 0.8) {
+    if (id !== 'knife' && id !== 'zeus' && Math.random() < 0.8) {
       const t = rnd(0.32, 0.5);
       const f = rnd(3800, 5200);
-      const v = id === 'awp' || id === 'deagle' ? 0.06 : 0.045;
+      const v = def.cls === 'sniper' || def.cls === 'shotgun' || id === 'deagle' || id === 'r8' ? 0.06 : 0.045;
       this.ring(dst, f, v, 0.12, t);
       if (Math.random() < 0.6) this.ring(dst, f * rnd(0.9, 1.1), v * 0.5, 0.08, t + rnd(0.06, 0.12));
     }

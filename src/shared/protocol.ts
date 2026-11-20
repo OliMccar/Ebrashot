@@ -31,7 +31,9 @@ export interface RoundNet {
 }
 
 export type GameEvent =
-  | { e: 'shot'; id: number; w: WeaponId; o: V3; end: V3; sup?: boolean }
+  | { e: 'shot'; id: number; w: WeaponId; o: V3; end: V3; sup?: boolean; pi?: number }
+  /** decoy imitando um tiro da arma do dono */
+  | { e: 'decoy'; p: V3; w: WeaponId }
   | { e: 'impact'; p: V3; n: V3; m: Mat; id: number }
   | { e: 'hit'; att: number; vic: number; dmg: number; hg: number; p: V3; armor: boolean }
   | { e: 'kill'; k: number; v: number; w: WeaponId | 'bomb' | 'world'; hs: boolean; wb: boolean }

@@ -400,6 +400,7 @@ export class Hud {
     }).join('');
     const title = this.buyCat < 0 ? 'Loja' : BUY_CATS[this.buyCat];
     const idle = this.buyCat < 0 ? 'Escolha uma categoria' : 'Clique no centro para voltar';
+    this.buyEl.style.setProperty('--bw-font', n > 7 ? '15px' : n > 5 ? '17px' : '20px');
     this.buyEl.innerHTML = `<div class="bw-wrap">
       <svg class="bw" viewBox="-260 -260 520 520">${wedges}<circle class="bw-center ${this.buyCat >= 0 ? 'back' : ''}" r="${R0 - 6}"/></svg>
       <div class="bw-mid">
