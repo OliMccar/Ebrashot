@@ -269,6 +269,109 @@ export interface CharacterModel {
   phase: number;
   deadT: number;
   tag: THREE.Sprite | null;
+  /** braços articulados (ombro → cotovelo → mão), posicionados por IK em poseCharacter() */
+  arms: { R: Arm; L: Arm };
+  poseKey: string;
+}
+
+interface Arm { shoulder: THREE.Vector3; upper: THREE.Mesh; fore: THREE.Mesh; hand: THREE.Mesh; side: 1 | -1 }
+
+/** Como o personagem segura a arma: 'aim' na partida, 'idle' (descanso) no menu. */
+export type HoldStyle = 'aim' | 'idle';
+
+const UPPER_LEN = 0.34, FORE_LEN = 0.37;
+const SEG_DIR = new THREE.Vector3(0, 0, -1);
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+
+/** Segmento de braço: caixa de comprimento 1 ao longo de -Z (escalada no comprimento real). */
+function armSegment(w: number, color: number) {
+  const g = new GeoBuilder().box(w, w, 1, color, [0, 0, -0.5]).build();
+  return new THREE.Mesh(g, VC_MAT);
+}
+
+/** Estica um segmento de a até b (espaço local do tronco). */
+function placeSegment(m: THREE.Mesh, a: THREE.Vector3, b: THREE.Vector3) {
+  _v1.subVectors(b, a);
+  const len = Math.max(0.01, _v1.length());
+  m.position.copy(a);
+  m.quaternion.setFromUnitVectors(SEG_DIR, _v1.divideScalar(len));
+  m.scale.set(1, 1, len);
+}
+
+/**
+ * IK analítico de 2 ossos: dado ombro S e alvo T, acha o cotovelo E com o cotovelo
+ * apontando para "pole" (para baixo e para fora). Se o alvo está longe demais, o braço estica até onde alcança.
+ */
+function solveArm(arm: Arm, target: THREE.Vector3, pole: THREE.Vector3) {
+  const S = arm.shoulder;
+  const dir = _v2.subVectors(target, S);
+  let d = dir.length();
+  dir.divideScalar(d || 1);
+  d = Math.min(UPPER_LEN + FORE_LEN - 0.002, Math.max(Math.abs(UPPER_LEN - FORE_LEN) + 0.01, d));
+  const T = new THREE.Vector3().copy(S).addScaledVector(dir, d);
+  const a = (UPPER_LEN * UPPER_LEN - FORE_LEN * FORE_LEN + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, UPPER_LEN * UPPER_LEN - a * a));
+  // direção perpendicular ao braço, no plano do "pole"
+  const perp = _v3.copy(pole).addScaledVector(dir, -pole.dot(dir));
+  if (perp.lengthSq() < 1e-6) perp.set(0, -1, 0);
+  perp.normalize();
+  const E = new THREE.Vector3().copy(S).addScaledVector(dir, a).addScaledVector(perp, h);
+  placeSegment(arm.upper, S, E);
+  placeSegment(arm.fore, E, T);
+  arm.hand.position.copy(T);
+  arm.hand.quaternion.copy(arm.fore.quaternion);
+}
+
+type Hold = { pos: [number, number, number]; rot: [number, number, number]; twoHands: boolean; support?: [number, number, number] };
+
+const RIFLES: WeaponId[] = ['ak47', 'm4a1', 'awp'];
+const PISTOLS: WeaponId[] = ['glock', 'usp', 'deagle'];
+
+/** Onde fica o cabo da arma (mão direita) e sua rotação, por estilo e tipo de arma. Espaço do tronco; frente = -Z. */
+function holdFor(id: WeaponId | '', style: HoldStyle): Hold {
+  const rifle = RIFLES.includes(id as WeaponId), pistol = PISTOLS.includes(id as WeaponId);
+  if (style === 'aim') {
+    if (rifle) return { pos: [0.06, 0.44, -0.4], rot: [0, 0, 0], twoHands: true };
+    if (pistol) return { pos: [0.02, 0.44, -0.56], rot: [0, 0, 0], twoHands: true };
+    if (id === 'knife') return { pos: [0.2, 0.3, -0.42], rot: [-0.25, 0.1, 0], twoHands: false };
+    if (id === 'c4') return { pos: [0.08, 0.28, -0.42], rot: [0.2, 0, 0], twoHands: true, support: [-0.15, 0, 0] };
+    return { pos: [0.2, 0.42, -0.36], rot: [0, 0, 0], twoHands: false }; // granadas
+  }
+  // descanso (menu): arma baixa, atravessada no corpo, cano apontando para o chão à esquerda
+  if (rifle) return { pos: [0.14, 0.27, -0.33], rot: [-0.5, 0.5, 0.3], twoHands: true };
+  if (pistol) return { pos: [0.03, 0.17, -0.42], rot: [-0.72, 0.05, 0], twoHands: true };
+  if (id === 'knife') return { pos: [0.3, -0.13, -0.13], rot: [-0.32, -0.08, 0.06], twoHands: false };
+  if (id === 'c4') return { pos: [0.08, 0.22, -0.36], rot: [0.3, 0, 0], twoHands: true, support: [-0.15, 0, 0] };
+  return { pos: [0.29, -0.08, -0.16], rot: [-0.4, 0, 0], twoHands: false };
+}
+
+/** Braço solto: pende ao lado do corpo, cotovelo levemente para trás. */
+const RELAXED_POLE = (side: number) => new THREE.Vector3(side * 0.3, -0.15, 1);
+
+/**
+ * Posiciona a arma e os braços. Só recalcula quando a arma ou o estilo mudam
+ * (os braços são filhos do tronco, então acompanham a inclinação dele de graça).
+ */
+export function poseCharacter(c: CharacterModel, style: HoldStyle) {
+  const key = c.weaponId + '|' + style;
+  if (c.poseKey === key) return;
+  c.poseKey = key;
+  const h = holdFor(c.weaponId, style);
+  const holder = c.weaponHolder;
+  holder.position.set(...h.pos);
+  holder.rotation.set(h.rot[0], h.rot[1], h.rot[2], 'YXZ');
+  holder.updateMatrix();
+  // mão direita no cabo (origem da arma); com uma mão só e arma baixa, o braço pende natural
+  const oneHandLow = !h.twoHands && h.pos[1] < 0.2;
+  solveArm(c.arms.R, holder.position.clone(), oneHandLow ? RELAXED_POLE(1) : new THREE.Vector3(0.6, -1, 0.25));
+  // mão esquerda no apoio da arma, ou solta ao lado do corpo
+  let lt: THREE.Vector3;
+  if (h.twoHands && c.weapon) {
+    lt = (h.support ? new THREE.Vector3(...h.support) : c.weapon.support.clone()).applyMatrix4(holder.matrix);
+  } else {
+    lt = new THREE.Vector3(-0.3, style === 'aim' ? -0.1 : -0.17, style === 'aim' ? -0.12 : -0.04);
+  }
+  solveArm(c.arms.L, lt, h.twoHands ? new THREE.Vector3(-0.6, -1, 0.25) : RELAXED_POLE(-1));
 }
 
 const TEAM_COL = {
@@ -296,14 +399,21 @@ export function buildCharacter(team: Team): CharacterModel {
   ub.box(0.46, 0.38, 0.29, col.vest, [0, 0.34, 0]);
   ub.box(0.12, 0.08, 0.03, col.accent, [0.12, 0.42, -0.15]);
   ub.box(0.14, 0.12, 0.14, SKIN, [0, 0.62, 0]);
-  // braços apontando a arma para frente
-  ub.box(0.12, 0.12, 0.34, col.shirt, [0.23, 0.42, -0.13], [0.35, 0, 0]);
-  ub.box(0.11, 0.11, 0.32, col.shirt, [0.06, 0.36, -0.36], [0.1, 0.5, 0]);
-  ub.box(0.12, 0.12, 0.34, col.shirt, [-0.23, 0.42, -0.13], [0.35, 0, 0]);
-  ub.box(0.11, 0.11, 0.34, col.shirt, [-0.08, 0.38, -0.38], [0.1, -0.6, 0]);
-  ub.box(0.1, 0.1, 0.1, 0x2a2622, [0.0, 0.34, -0.5]);
-  ub.box(0.1, 0.1, 0.1, 0x2a2622, [-0.02, 0.37, -0.58]);
+  // ombros (os braços em si são articulados, veja poseCharacter)
+  ub.box(0.13, 0.12, 0.2, col.shirt, [0.25, 0.5, -0.02]);
+  ub.box(0.13, 0.12, 0.2, col.shirt, [-0.25, 0.5, -0.02]);
   upper.add(ub.mesh());
+  const mkArm = (side: 1 | -1): Arm => {
+    const arm: Arm = {
+      shoulder: new THREE.Vector3(0.25 * side, 0.5, side < 0 ? -0.08 : -0.02),
+      upper: armSegment(0.12, col.shirt), fore: armSegment(0.105, col.shirt),
+      hand: new THREE.Mesh(new GeoBuilder().box(0.095, 0.1, 0.1, 0x2a2622, [0, 0, 0]).build(), VC_MAT),
+      side,
+    };
+    upper.add(arm.upper, arm.fore, arm.hand);
+    return arm;
+  };
+  const arms = { R: mkArm(1), L: mkArm(-1) };
   const head = new THREE.Group(); head.position.y = 0.78; upper.add(head);
   const hb = new GeoBuilder();
   hb.box(0.24, 0.27, 0.26, SKIN, [0, 0, 0]);
@@ -321,7 +431,7 @@ export function buildCharacter(team: Team): CharacterModel {
   upper.add(weaponHolder);
   return {
     root, upper, legL: L.leg, legR: Rr.leg, shinL: L.shin, shinR: Rr.shin, head, weaponHolder,
-    weaponId: '', weapon: null, team, phase: Math.random() * 6, deadT: 0, tag: null,
+    weaponId: '', weapon: null, team, phase: Math.random() * 6, deadT: 0, tag: null, arms, poseKey: '',
   };
 }
 

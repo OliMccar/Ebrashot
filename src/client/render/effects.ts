@@ -37,9 +37,17 @@ export class Effects {
   private firePool: FireFx[] = [];
   private maxParticles: number;
   light: THREE.PointLight | null = null;
+  /** Desliga a luz dinâmica sem recompilar shaders (a luz continua na cena com intensidade 0). */
+  lightsOn = true;
+  blood = true;
   private lightT = 0;
 
-  constructor(private scene: THREE.Scene, mobile: boolean) {
+  /**
+   * @param level      0 baixo, 1 médio, 2 alto: quantidade de decals, partículas e chamas
+   * @param mobile     mantém a fumaça igual ao comportamento anterior (densidade da fumaça não depende da qualidade)
+   * @param dynLights  cria a luz dinâmica de disparos e explosões
+   */
+  constructor(private scene: THREE.Scene, level: 0 | 1 | 2, mobile: boolean, dynLights: boolean) {
     const T = textures();
     const trMat = new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
     const trGeo = new THREE.BoxGeometry(0.018, 0.018, 1);
@@ -50,7 +58,7 @@ export class Effects {
       scene.add(mesh);
       this.tracers.push({ mesh, from: new THREE.Vector3(), dir: new THREE.Vector3(), len: 0, t: 0, active: false });
     }
-    const decalCount = mobile ? 96 : 220;
+    const decalCount = [64, 140, 260][level];
     this.decals = new THREE.InstancedMesh(
       new THREE.PlaneGeometry(0.11, 0.11),
       new THREE.MeshBasicMaterial({ map: T.hole, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 }),
@@ -61,7 +69,7 @@ export class Effects {
     this.decals.frustumCulled = false;
     scene.add(this.decals);
 
-    this.maxParticles = mobile ? 220 : 500;
+    this.maxParticles = [160, 320, 600][level];
     this.partMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff }), this.maxParticles);
     this.partMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(this.maxParticles * 3), 3);
     for (let i = 0; i < this.maxParticles; i++) {
@@ -99,7 +107,7 @@ export class Effects {
     for (let i = 0; i < 4; i++) {
       const group = new THREE.Group(); group.visible = false; scene.add(group);
       const flames: THREE.Sprite[] = [];
-      for (let k = 0; k < (mobile ? 10 : 16); k++) {
+      for (let k = 0; k < [8, 12, 18][level]; k++) {
         const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: T.flame, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
         group.add(sp); flames.push(sp);
       }
@@ -108,7 +116,7 @@ export class Effects {
       group.add(scorch);
       this.firePool.push({ id: -1, group, flames, scorch, seen: false, r: 3 });
     }
-    if (!mobile) {
+    if (dynLights) {
       this.light = new THREE.PointLight(0xffc070, 0, 9, 2);
       scene.add(this.light);
     }
@@ -161,7 +169,11 @@ export class Effects {
     if (m === 'metal') this.burst(p, n, 0xfff0a0, 3, 7, 0.02, 0.2, 4, 1.5);
   }
 
-  blood(p: V3, dir: V3, head: boolean) {
+  bloodFx(p: V3, dir: V3, head: boolean) {
+    if (this.blood) this.bloodBurst(p, dir, head);
+  }
+
+  private bloodBurst(p: V3, dir: V3, head: boolean) {
     this.burst(p, dir, 0x8a0f0f, head ? 12 : 7, head ? 3.5 : 2.5, 0.045, 0.5, 9, 1.4);
   }
 
@@ -171,7 +183,7 @@ export class Effects {
     f.sp.scale.setScalar(scale * (0.8 + Math.random() * 0.4));
     f.sp.material.rotation = Math.random() * Math.PI;
     f.sp.visible = true; f.t = 0.05;
-    if (this.light) { this.light.position.set(p.x, p.y, p.z); this.light.intensity = 3; this.lightT = 0.05; }
+    if (this.light && this.lightsOn) { this.light.position.set(p.x, p.y, p.z); this.light.intensity = 3; this.lightT = 0.05; }
   }
 
   explosion(p: V3, big: boolean) {
@@ -183,7 +195,7 @@ export class Effects {
     this.burst({ x: p.x, y: p.y + 0.2, z: p.z }, { x: 0, y: 1, z: 0 }, 0xffa040, big ? 60 : 30, big ? 14 : 9, 0.09, 0.9, 6, 2.2);
     this.burst({ x: p.x, y: p.y + 0.2, z: p.z }, { x: 0, y: 1, z: 0 }, 0x3a332c, big ? 40 : 20, big ? 6 : 4, 0.25, 1.6, -0.5, 2);
     this.decal({ x: p.x, y: p.y + 0.01, z: p.z }, { x: 0, y: 1, z: 0 });
-    if (this.light) { this.light.position.set(p.x, p.y + 1, p.z); this.light.intensity = big ? 40 : 15; this.light.distance = big ? 40 : 18; this.lightT = 0.25; }
+    if (this.light && this.lightsOn) { this.light.position.set(p.x, p.y + 1, p.z); this.light.intensity = big ? 40 : 15; this.light.distance = big ? 40 : 18; this.lightT = 0.25; }
   }
 
   flashPop(p: V3) {
@@ -251,9 +263,11 @@ export class Effects {
     for (const t of this.tracers) {
       if (!t.active) continue;
       t.t += dt;
-      const head = Math.min(t.len, t.t * 320);
-      const tail = Math.max(0, head - 4);
-      if (tail >= t.len - 0.01) { t.active = false; t.mesh.visible = false; continue; }
+      // a cauda segue o tempo (não a cabeça já parada no impacto): tiros curtos (< 4 m) também terminam
+      const travel = t.t * 320;
+      const head = Math.min(t.len, travel);
+      const tail = Math.min(head, Math.max(0, travel - 4));
+      if (tail >= t.len - 0.01 || t.t > 2) { t.active = false; t.mesh.visible = false; continue; }
       t.mesh.position.copy(t.from).addScaledVector(t.dir, tail);
       t.mesh.scale.set(1, 1, Math.max(0.01, head - tail));
     }

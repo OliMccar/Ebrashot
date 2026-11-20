@@ -14,7 +14,8 @@ import { Input, isTouch } from './input/input';
 import type { Connection } from './net';
 import { Effects } from './render/effects';
 import { buildMapMesh } from './render/mapMesh';
-import { type CharacterModel, buildCharacter, buildWeaponCached, makeTextSprite, setCharacterWeapon } from './render/models';
+import { textures } from './render/textures';
+import { type CharacterModel, buildCharacter, buildWeaponCached, makeTextSprite, poseCharacter, setCharacterWeapon } from './render/models';
 import { ViewModel } from './render/viewmodel';
 import type { Settings } from './settings';
 
@@ -87,7 +88,115 @@ export class Game {
   private interpDelay: number;
   private reloadTimers: number[] = [];
   private lastWeapon: WeaponId | '' = '';
+  private heartT = 0;
+  /** Desenhar as mãos/arma em primeira pessoa neste frame (vivo ou assistindo alguém). */
+  private vmVisible = false;
+  /** Estado reconstruído do jogador assistido, para animar as mãos dele. */
+  private specVm: { id: number; w: WeaponId; deployT: number; reloadT: number; yaw: number; pitch: number } | null = null;
+
+  /** Id do jogador sendo assistido agora (0 se nenhum). */
+  private specId() {
+    if (this.predicted?.alive || !this.snap || !this.spectateId) return 0;
+    return this.snap.players.some((p) => p.id === this.spectateId && p.a) ? this.spectateId : 0;
+  }
+
+  /** Atualiza as mãos em primeira pessoa do jogador assistido. Retorna false se não há ninguém. */
+  private updateSpectatorVm(dt: number) {
+    const id = this.specId();
+    const pn = id ? this.snap!.players.find((p) => p.id === id) : undefined;
+    const r = id ? this.interp(id) : null;
+    if (!pn || !r) { this.specVm = null; return false; }
+    let sv = this.specVm;
+    if (!sv || sv.id !== id) {
+      sv = this.specVm = { id, w: pn.w, deployT: WEAPONS[pn.w].deployTime, reloadT: 0, yaw: r.yaw, pitch: r.pitch };
+    }
+    if (pn.w !== sv.w) { sv.w = pn.w; sv.deployT = WEAPONS[pn.w].deployTime; sv.reloadT = 0; }
+    sv.deployT = Math.max(0, sv.deployT - dt);
+    sv.reloadT = Math.max(0, sv.reloadT - dt);
+    // balanço da arma a partir de quanto a mira dele girou (convertido para "contagens de mouse")
+    const dx = -angleDiff(sv.yaw, r.yaw) * 1300, dy = -(r.pitch - sv.pitch) * 1300;
+    sv.yaw = r.yaw; sv.pitch = r.pitch;
+    const fake = {
+      weapon: pn.w, scope: 0, vel: { x: pn.vx, y: 0, z: pn.vz }, onGround: pn.og,
+      deployT: sv.deployT, reloadT: sv.reloadT, throwT: 0,
+    } as unknown as PlayerState;
+    this.vm.team = pn.tm;
+    this.vm.update(dt, fake, { dx, dy }, { plantP: 0, crouch: r.duck, aspect: this.camera.aspect, visible: true });
+    return true;
+  }
+
+  /** Som de bala passando perto quando um tiro inimigo cruza perto do ouvinte. */
+  private bulletWhiz(o: V3, end: V3) {
+    if (!this.predicted?.alive) return;
+    const c = this.camera.position;
+    const dx = end.x - o.x, dy = end.y - o.y, dz = end.z - o.z;
+    const L2 = dx * dx + dy * dy + dz * dz;
+    if (L2 < 1) return;
+    const t = clamp(((c.x - o.x) * dx + (c.y - o.y) * dy + (c.z - o.z) * dz) / L2, 0, 1);
+    if (t <= 0.02 || t >= 0.98) return; // não passou pelo jogador (parou antes ou é o próprio alvo)
+    const px = o.x + dx * t, py = o.y + dy * t, pz = o.z + dz * t;
+    if (Math.hypot(px - c.x, py - c.y, pz - c.z) < 2.2) this.audio.whiz({ x: px, y: py, z: pz });
+  }
   private onResize = () => this.resize();
+  private sun!: THREE.DirectionalLight;
+  private lastDraw = 0;
+
+  private computeDpr() {
+    const cap = this.mobile ? 2 : 2.5;
+    this.dprMax = Math.max(0.5, Math.min(cap, (window.devicePixelRatio || 1) * this.settings.gScale));
+  }
+
+  /** Aplica as opções gráficas que podem mudar durante a partida. */
+  applyGraphics() {
+    const g = this.settings;
+    // escala de renderização
+    this.computeDpr();
+    const nd = g.gDynRes ? Math.min(this.dpr, this.dprMax) : this.dprMax;
+    if (Math.abs(nd - this.dpr) > 0.01 || this.renderer.getPixelRatio() !== nd) { this.dpr = nd; this.renderer.setPixelRatio(nd); this.resize(); }
+    // sombras
+    const on = g.gShadows !== 'off';
+    const type = g.gShadows === 'high' ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    const sm = this.renderer.shadowMap;
+    const recompile = sm.enabled !== on || (on && sm.type !== type);
+    sm.enabled = on; sm.type = type;
+    this.sun.castShadow = on;
+    const q = g.gShadows;
+    if (q !== 'off') {
+      const size = { low: 1024, medium: 2048, high: 4096 }[q];
+      if (this.sun.shadow.mapSize.x !== size) {
+        this.sun.shadow.mapSize.set(size, size);
+        this.sun.shadow.map?.dispose();
+        (this.sun.shadow as { map: THREE.WebGLRenderTarget | null }).map = null;
+      }
+    }
+    if (recompile) {
+      const mark = (o: THREE.Object3D) => {
+        const m = (o as THREE.Mesh).material;
+        if (m) (Array.isArray(m) ? m : [m]).forEach((x) => { x.needsUpdate = true; });
+      };
+      this.scene.traverse(mark);
+    }
+    // distância de visão (neblina)
+    const fog = this.scene.fog as THREE.Fog;
+    const [near, far] = { low: [55, 190], medium: [80, 260], high: [140, 420] }[g.gViewDist];
+    fog.near = near; fog.far = far;
+    // filtragem de textura
+    const maxA = this.renderer.capabilities.getMaxAnisotropy();
+    for (const t of Object.values(textures())) {
+      const a = Math.max(1, Math.min(maxA, g.gAniso));
+      if (t.anisotropy !== a) { t.anisotropy = a; t.needsUpdate = true; }
+    }
+    // efeitos
+    this.effects.lightsOn = g.gDynLights;
+    if (!g.gDynLights && this.effects.light) this.effects.light.intensity = 0;
+    this.effects.blood = g.gBlood;
+    // brilho / contraste / saturação (filtro CSS: custo quase zero quando neutro)
+    const f = g.gBright === 1 && g.gContrast === 1 && g.gSat === 1 ? '' : `brightness(${g.gBright}) contrast(${g.gContrast}) saturate(${g.gSat})`;
+    if (this.renderer.domElement.style.filter !== f) this.renderer.domElement.style.filter = f;
+    // viewmodel
+    this.vm.fov = g.vmFov; this.vm.offX = g.vmX; this.vm.offY = g.vmY; this.vm.offZ = g.vmZ; this.vm.bob = g.vmBob;
+    this.hud.setCrosshair();
+  }
 
   constructor(private container: HTMLElement, private opts: GameOptions) {
     this.settings = opts.settings;
@@ -109,10 +218,10 @@ export class Game {
       isUiOpen: () => this.hud.buyOpen || !!this.pauseEl,
     }, () => this.predicted);
     this.mobile = this.input.mobile;
-    const q = this.settings.quality;
-    this.dprMax = q === 'low' ? 0.75 : q === 'high' ? Math.min(devicePixelRatio, 2) : Math.min(devicePixelRatio, this.mobile ? 1.5 : 2);
-    this.dpr = this.mobile && q === 'auto' ? Math.min(1, this.dprMax) : this.dprMax;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: !this.mobile && q !== 'low', powerPreference: 'high-performance', stencil: false });
+    const g = this.settings;
+    this.computeDpr();
+    this.dpr = this.mobile && g.gDynRes ? Math.min(1, this.dprMax) : this.dprMax;
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: g.gMsaa, powerPreference: 'high-performance', stencil: false });
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.autoClear = false;
@@ -121,14 +230,31 @@ export class Game {
     this.scene.fog = new THREE.Fog(0xead7b4, 80, 260);
     this.scene.add(new THREE.HemisphereLight(0xfff3dd, 0x8a6c48, 1.55));
     const sun = new THREE.DirectionalLight(0xfff0d2, 2.1);
-    sun.position.set(40, 80, 25);
-    this.scene.add(sun);
-    this.scene.add(buildMapMesh(this.map));
-    this.effects = new Effects(this.scene, this.mobile);
+    sun.position.set(60, 120, 37.5);
+    // sombra cobre o mapa inteiro (bounds ±48 x ±58) com folga
+    const sc = sun.shadow.camera;
+    sc.left = -82; sc.right = 82; sc.top = 82; sc.bottom = -82; sc.near = 20; sc.far = 320;
+    sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.04;
+    sun.shadow.intensity = 0.72;
+    this.sun = sun;
+    this.scene.add(sun, sun.target);
+    const mapMesh = buildMapMesh(this.map);
+    mapMesh.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material instanceof THREE.MeshLambertMaterial) { o.castShadow = true; o.receiveShadow = true; }
+    });
+    this.scene.add(mapMesh);
+    const lvl = ({ low: 0, medium: 1, high: 2 } as const)[g.gEffects];
+    this.effects = new Effects(this.scene, lvl, this.mobile, g.gDynLights);
+    this.applyGraphics();
+    // áudio: sons atrás de paredes ficam abafados; vento ambiente durante a partida
+    this.audio.los = (a, b) => this.world.los(a, b);
+    this.audio.startAmbience();
     const bomb = buildWeaponCached('c4');
     this.bombObj = bomb.root;
     this.bombObj.scale.setScalar(1.4);
     this.bombObj.visible = false;
+    this.bombObj.traverse((o) => { o.castShadow = true; });
     this.bombLed = this.bombObj.getObjectByName('led') ?? null;
     this.scene.add(this.bombObj);
     this.hud.onBuy = (item) => this.conn.buy(item);
@@ -218,6 +344,14 @@ export class Game {
   private frame = (now: number) => {
     if (!this.running) return;
     this.raf = requestAnimationFrame(this.frame);
+    // limite de FPS: pula frames do requestAnimationFrame (o tempo acumulado segue para o próximo)
+    const cap = this.settings.gFpsCap;
+    if (cap > 0) {
+      const iv = 1000 / cap;
+      const el = now - this.lastDraw;
+      if (el < iv - 1) return;
+      this.lastDraw = el > iv * 2 ? now : this.lastDraw + iv;
+    }
     const dtRaw = (now - this.last) / 1000;
     this.last = now;
     const dt = Math.min(0.1, Math.max(0, dtRaw));
@@ -349,6 +483,7 @@ export class Game {
       if (!m || m.team !== pn.tm) {
         if (m) this.scene.remove(m.root);
         m = buildCharacter(pn.tm);
+        m.root.traverse((o) => { if ((o as THREE.Mesh).isMesh && !(o as THREE.Sprite).isSprite) o.castShadow = true; });
         m.root.rotation.order = 'YXZ';
         this.scene.add(m.root);
         this.models.set(pn.id, m);
@@ -356,6 +491,7 @@ export class Game {
       m.root.visible = pn.id !== specId;
       m.root.position.set(r.pos.x, r.pos.y, r.pos.z);
       setCharacterWeapon(m, pn.w);
+      poseCharacter(m, 'aim');
       const speed = Math.hypot(pn.vx, pn.vz);
       if (pn.a) {
         m.deadT = 0;
@@ -493,9 +629,13 @@ export class Game {
           }
         }
         const p = { x: i.origin.x + i.dir.x * end, y: i.origin.y + i.dir.y * end, z: i.origin.z + i.dir.z * end };
-        if (wall && !hitPlayer && (wall.box.vis || wall.box.min.y < 0)) this.effects.impact(p, wall.normal, wall.box.vis ? wall.box.mat : this.world.floorMaterial(p));
+        if (wall && !hitPlayer && (wall.box.vis || wall.box.min.y < 0)) {
+          const mat = wall.box.vis ? wall.box.mat : this.world.floorMaterial(p);
+          this.effects.impact(p, wall.normal, mat);
+          this.audio.impact(mat, p);
+        }
         if (def.slot <= 1 && Math.random() < (def.id === 'awp' ? 1 : 0.55)) this.effects.tracer(this.muzzleWorld(), p);
-        if (this.effects.light && !def.sound.suppressed) this.effects.muzzle(this.muzzleWorld(), 0.01);
+        if (this.effects.light && this.effects.lightsOn && !def.sound.suppressed) this.effects.muzzle(this.muzzleWorld(), 0.01);
         break;
       }
       case 'melee': this.vm.onMelee(i.heavy); this.audio.knife(false); break;
@@ -508,7 +648,7 @@ export class Game {
       case 'dry': this.audio.dry(); break;
       case 'pin': this.audio.pin(); break;
       case 'throw': this.audio.throwSnd(); break;
-      case 'land': if (i.speed > 4) this.audio.land(); break;
+      case 'land': if (i.speed > 4) this.audio.land(this.world.floorMaterial(st.pos)); break;
       default: break;
     }
     void st;
@@ -565,14 +705,16 @@ export class Game {
         if (!def.sound.suppressed) this.effects.muzzle(mz, e.w === 'awp' ? 0.9 : 0.6);
         if (Math.random() < 0.6 || e.w === 'awp') this.effects.tracer(mz, e.end);
         this.audio.gunshot(def, e.o);
+        this.bulletWhiz(e.o, e.end);
+        if (e.id === this.specId()) { this.vm.onFire(e.w); if (this.specVm) this.specVm.reloadT = 0; }
         break;
       }
-      case 'impact': if (e.id !== you) this.effects.impact(e.p, e.n, e.m); break;
+      case 'impact': if (e.id !== you) { this.effects.impact(e.p, e.n, e.m); this.audio.impact(e.m, e.p); } break;
       case 'hit': {
         const ap = this.posOf(e.att);
         const dir = ap ? { x: e.p.x - ap.x, y: 0.3, z: e.p.z - ap.z } : { x: 0, y: 1, z: 0 };
         const L = Math.hypot(dir.x, dir.y, dir.z) || 1;
-        if (e.vic !== you) this.effects.blood(e.p, { x: dir.x / L, y: dir.y / L, z: dir.z / L }, e.hg === 1);
+        if (e.vic !== you) this.effects.bloodFx(e.p, { x: dir.x / L, y: dir.y / L, z: dir.z / L }, e.hg === 1);
         if (e.att === you && e.vic !== you) { this.hud.hit(e.hg === 1, false); if (e.hg === 1) this.audio.headshot(); else this.audio.hitBody(); }
         if (e.vic === you) { this.hud.damage(); this.audio.hurt(); this.flinch += 0.025 * Math.min(2, e.dmg / 30); if (e.hg === 1) this.audio.headshot(); }
         break;
@@ -590,7 +732,10 @@ export class Game {
         }
         break;
       }
-      case 'melee': if (e.id !== you) this.audio.knife(e.hit, this.posOf(e.id)); else if (e.hit) this.audio.knife(true); break;
+      case 'melee':
+        if (e.id !== you) this.audio.knife(e.hit, this.posOf(e.id)); else if (e.hit) this.audio.knife(true);
+        if (e.id === this.specId()) this.vm.onMelee(e.heavy);
+        break;
       case 'throw': if (e.id !== you) this.audio.throwSnd(this.posOf(e.id)); break;
       case 'det': {
         const d = this.camera.position.distanceTo(new THREE.Vector3(e.p.x, e.p.y, e.p.z));
@@ -607,7 +752,8 @@ export class Game {
       }
       case 'flash': if (e.id === you) { this.hud.flash(e.dur); this.audio.flashRing(e.dur); } break;
       case 'bounce': this.audio.bounce(e.p); break;
-      case 'reload': if (e.id !== you) { const p = this.posOf(e.id); this.audio.reload(0, p); setTimeout(() => this.audio.reload(1, p), 900); } break;
+      case 'reload': if (e.id === this.specId() && this.specVm) this.specVm.reloadT = WEAPONS[e.w].reloadTime;
+        if (e.id !== you) { const p = this.posOf(e.id); this.audio.reload(0, p); setTimeout(() => this.audio.reload(1, p), 900); } break;
       case 'planted': this.hud.banner('A BOMBA FOI PLANTADA', 'bomb', 3); this.audio.jingle('planted'); this.beepT = 0; break;
       case 'defused': this.hud.banner('BOMBA DESARMADA', 'CT', 3); break;
       case 'plantStart': case 'defuseStart': this.audio.plantBeep(this.posOf(e.id)); break;
@@ -649,10 +795,25 @@ export class Game {
     const look = this.input.consumeLook();
     const alive = !!st?.alive;
     if (st) {
-      if (st.weapon !== this.lastWeapon) { this.lastWeapon = st.weapon; }
-      this.vm.team = this.team ?? 'T';
-      this.vm.update(dt, st, look, { plantP: me?.plantP ?? 0, crouch: st.duck, aspect: this.camera.aspect, visible: alive });
+      if (st.weapon !== this.lastWeapon) {
+        if (this.lastWeapon && alive) this.audio.deploy(st.weapon);
+        this.lastWeapon = st.weapon;
+      }
+      // batimento cardíaco com vida baixa
+      const hp = me?.hp ?? 100;
+      if (alive && hp > 0 && hp <= 25) {
+        this.heartT -= dt;
+        if (this.heartT <= 0) { this.audio.heartbeat(); this.heartT = hp <= 10 ? 0.62 : 0.85; }
+      } else this.heartT = 0;
       this.input.updateWeaponBar(st);
+    }
+    if (st && alive) {
+      this.specVm = null;
+      this.vm.team = this.team ?? 'T';
+      this.vm.update(dt, st, look, { plantP: me?.plantP ?? 0, crouch: st.duck, aspect: this.camera.aspect, visible: true });
+      this.vmVisible = st.scope === 0;
+    } else {
+      this.vmVisible = this.updateSpectatorVm(dt);
     }
     const def = st ? WEAPONS[st.weapon] : null;
     const slot = st ? slotState(st) : null;
@@ -682,10 +843,13 @@ export class Game {
     const specActive = !alive && !!snap && !!this.spectateId && snap.players.some((p) => p.id === this.spectateId && p.a);
     this.frames++; this.fpsT += dt;
     if (this.fpsT >= 0.5) { this.fps = Math.round(this.frames / this.fpsT); this.frames = 0; this.fpsT = 0; }
+    const specP = specActive ? snap!.players.find((p) => p.id === this.spectateId) : undefined;
     this.hud.update(dt, {
-      hp: me?.hp ?? 0, armor: me?.armor ?? 0, helmet: !!me?.helmet, money: me?.money ?? 0, kit: !!me?.kit, c4: !!st?.inv.c4,
-      weaponName: def ? def.name : '', mag: slot?.mag ?? 0, res: slot?.res ?? 0, showAmmo: !!slot,
-      inacc: st ? computeInaccuracy(st) : 0, scoped: !!st && st.scope > 0, alive,
+      hp: specP ? specP.hp : me?.hp ?? 0, armor: specP ? specP.ar : me?.armor ?? 0, helmet: specP ? specP.hm : !!me?.helmet,
+      money: me?.money ?? 0, kit: specP ? specP.kit : !!me?.kit, c4: specP ? specP.c4 : !!st?.inv.c4,
+      weaponName: specP ? WEAPONS[specP.w].name : def ? def.name : '', mag: slot?.mag ?? 0, res: slot?.res ?? 0, showAmmo: !specP && !!slot,
+      panels: alive || !!specP,
+      inacc: st ? computeInaccuracy(st) : 0, scoped: alive && !!st && st.scope > 0, alive,
       plantP: me?.plantP ?? 0, defuseP: me?.defuseP ?? 0, canBuy: !!me?.canBuy, hint, spectating,
       fps: this.settings.showFps ? this.fps : 0, ping: Math.round(this.conn.rtt),
       spreadPx, recoilX, recoilY, weaponGapPx, specActive,
@@ -767,14 +931,14 @@ export class Game {
     const r = this.renderer;
     r.clear();
     r.render(this.scene, this.camera);
-    if (this.predicted?.alive && this.predicted.scope === 0) {
+    if (this.vmVisible) {
       r.clearDepth();
       r.render(this.vm.scene, this.vm.camera);
     }
   }
 
   private adaptQuality(dtRaw: number) {
-    if (this.settings.quality !== 'auto') return;
+    if (!this.settings.gDynRes) return;
     this.frameAvg = this.frameAvg * 0.95 + dtRaw * 1000 * 0.05;
     this.dprT += dtRaw;
     if (this.dprT < 1.5) return;
@@ -793,6 +957,8 @@ export class Game {
     document.removeEventListener('pointerlockchange', this.onLockChange);
     this.reloadTimers.forEach(clearTimeout);
     this.input.dispose();
+    this.audio.stopAmbience();
+    this.audio.los = null;
     this.conn.close();
     this.renderer.dispose();
     this.renderer.domElement.remove();

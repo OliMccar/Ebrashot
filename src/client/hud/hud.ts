@@ -31,6 +31,8 @@ export interface HudState {
   inacc: number; scoped: boolean; alive: boolean; plantP: number; defuseP: number; canBuy: boolean; hint: string; spectating: string;
   fps: number; ping: number; kit: boolean; c4: boolean;
   /** abertura dinâmica da mira (px CSS), deslocamento do recoil (px CSS), gap da arma (px CSS) e se está assistindo alguém */
+  /** mostra vida/colete/arma (vivo ou assistindo alguém) */
+  panels: boolean;
   spreadPx: number; recoilX: number; recoilY: number; weaponGapPx: number; specActive: boolean;
 }
 
@@ -247,8 +249,8 @@ export class Hud {
     this.set('.mag', s.showAmmo ? String(s.mag) : '');
     this.set('.res', s.showAmmo ? `/ ${s.res}` : '');
     this.toggle('.ammo', 'low', s.showAmmo && s.mag <= 5);
-    this.toggle('.bottom-left', 'hidden', !s.alive);
-    this.toggle('.bottom-right', 'hidden', !s.alive);
+    this.toggle('.bottom-left', 'hidden', !s.panels);
+    this.toggle('.bottom-right', 'hidden', !s.panels);
     this.set('.hint', s.hint);
     this.set('.spectate', s.spectating);
     this.set('.fps', s.fps ? `${s.fps} FPS${s.ping ? ` · ${s.ping} ms` : ''}` : '');

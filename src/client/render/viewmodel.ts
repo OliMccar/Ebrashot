@@ -8,9 +8,52 @@ import { textures } from './textures';
 const POSE: Partial<Record<WeaponId, [number, number, number]>> = {
   ak47: [0.12, -0.14, -0.3], m4a1: [0.12, -0.14, -0.3], awp: [0.14, -0.19, -0.44],
   glock: [0.11, -0.115, -0.36], usp: [0.11, -0.115, -0.36], deagle: [0.11, -0.12, -0.36],
-  knife: [0.14, -0.14, -0.28], he: [0.13, -0.13, -0.27], flash: [0.13, -0.13, -0.27], smoke: [0.13, -0.13, -0.27],
+  knife: [0.17, -0.15, -0.34], he: [0.13, -0.13, -0.27], flash: [0.13, -0.13, -0.27], smoke: [0.13, -0.13, -0.27],
   molotov: [0.13, -0.15, -0.27], c4: [0.02, -0.17, -0.3],
 };
+
+/** Rotação base por arma (só a faca precisa: ponta para cima/dentro e lâmina inclinada). */
+const BASE_ROT: Partial<Record<WeaponId, [number, number, number]>> = {
+  knife: [0.82, 0.07, -0.72],
+};
+
+/** Keyframe de animação: [tempo 0..1, px, py, pz, rx, ry, rz, easing do trecho que termina aqui] */
+type Key = [number, number, number, number, number, number, number, 'smooth' | 'fast' | 'slow'];
+
+// golpe leve: corte diagonal da direita para a esquerda (dir = 1) ou de volta (dir = -1)
+const SLASH_A: Key[] = [
+  [0, 0, 0, 0, 0, 0, 0, 'smooth'],
+  [0.2, 0.07, 0.07, 0.03, 0.18, -0.55, -0.6, 'smooth'], // prepara: sobe para a direita
+  [0.46, -0.25, -0.07, -0.12, -0.28, 1.05, 0.6, 'fast'], // corta atravessando a tela
+  [0.66, -0.27, -0.09, -0.11, -0.32, 1.1, 0.65, 'slow'], // continuação
+  [1, 0, 0, 0, 0, 0, 0, 'smooth'],
+];
+const SLASH_B: Key[] = [
+  [0, 0, 0, 0, 0, 0, 0, 'smooth'],
+  [0.2, -0.13, 0.07, 0.02, 0.18, 0.65, 0.75, 'smooth'], // prepara: cruza para a esquerda
+  [0.46, 0.12, -0.08, -0.12, -0.28, -0.75, -0.55, 'fast'], // corta de volta (revés)
+  [0.66, 0.13, -0.1, -0.1, -0.32, -0.8, -0.6, 'slow'],
+  [1, 0, 0, 0, 0, 0, 0, 'smooth'],
+];
+// golpe forte: recua e levanta, estocada, segura, volta
+const STAB: Key[] = [
+  [0, 0, 0, 0, 0, 0, 0, 'smooth'],
+  [0.36, 0.03, 0.05, 0.1, 0.5, -0.12, -0.25, 'slow'], // carrega
+  [0.5, -0.08, 0.03, -0.32, -0.14, 0.14, 0.12, 'fast'], // estocada
+  [0.64, -0.09, 0.02, -0.33, -0.16, 0.14, 0.12, 'slow'], // segura no alvo
+  [1, 0, 0, 0, 0, 0, 0, 'smooth'],
+];
+
+function sampleKeys(keys: Key[], f: number): number[] {
+  let i = 1;
+  while (i < keys.length - 1 && f > keys[i][0]) i++;
+  const a = keys[i - 1], b = keys[i];
+  const u = Math.max(0, Math.min(1, (f - a[0]) / Math.max(1e-4, b[0] - a[0])));
+  const e = b[7] === 'fast' ? 1 - Math.pow(1 - u, 3) : b[7] === 'slow' ? u * u : u * u * (3 - 2 * u);
+  const out: number[] = [];
+  for (let k = 1; k <= 6; k++) out.push((a[k] as number) + ((b[k] as number) - (a[k] as number)) * e);
+  return out;
+}
 
 class Spring {
   v = 0; x = 0;
@@ -50,8 +93,15 @@ export class ViewModel {
   private inspectT = -1;
   private meleeT = -1;
   private meleeHeavy = false;
+  private slashDir = 1;
   private time = 0;
   team: Team = 'T';
+  /** viewmodel_fov (54..68 no CS) */
+  fov = 60;
+  /** viewmodel_offset_x/y/z (unidades do CS; 1 unidade ≈ 1 cm aqui) */
+  offX = 1; offY = 1; offZ = -1;
+  /** cl_bob: escala do balanço ao andar (0 desliga) */
+  bob = 1;
 
   constructor() {
     this.scene.add(new THREE.HemisphereLight(0xfff2dd, 0x6b5a45, 1.6));
@@ -85,13 +135,22 @@ export class ViewModel {
       g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), b.clone().sub(a).normalize());
       this.arms.add(g);
     };
+    const hand = (p: THREE.Vector3, size: [number, number, number] = [0.06, 0.07, 0.09]) => {
+      const h = new GeoBuilder().box(size[0], size[1], size[2], glove, [0, 0, 0]).mesh(); h.position.copy(p); this.arms.add(h);
+    };
+    if (model.id === 'knife') {
+      // punho fechado envolvendo o cabo (cabo vai de z -0.025 a 0.085); antebraço vem de baixo/trás
+      seg(new THREE.Vector3(0.05, -0.17, 0.42), new THREE.Vector3(0, -0.012, 0.07), 0.078, sleeve);
+      hand(new THREE.Vector3(0, -0.004, 0.035), [0.068, 0.072, 0.1]);
+      // polegar apoiado sobre o cabo
+      hand(new THREE.Vector3(-0.012, 0.03, 0.005), [0.03, 0.022, 0.05]);
+      return;
+    }
     const rh = new THREE.Vector3(0.0, -0.03, 0.04);
     const lh = model.support.clone();
     seg(new THREE.Vector3(0.12, -0.2, 0.38), rh, 0.075, sleeve);
-    seg(new THREE.Vector3(-0.22, -0.24, 0.3), lh, 0.072, sleeve);
-    const hand = (p: THREE.Vector3) => { const h = new GeoBuilder().box(0.06, 0.07, 0.09, glove, [0, 0, 0]).mesh(); h.position.copy(p); this.arms.add(h); };
-    hand(rh); hand(lh);
-    if (model.id === 'knife' || WEAPONS[model.id].slot === 3) { this.arms.children[1].visible = false; this.arms.children[3].visible = false; }
+    hand(rh);
+    if (WEAPONS[model.id].slot !== 3) { seg(new THREE.Vector3(-0.22, -0.24, 0.3), lh, 0.072, sleeve); hand(lh); }
   }
 
   setWeapon(id: WeaponId) {
@@ -120,13 +179,17 @@ export class ViewModel {
     this.inspectT = -1;
   }
 
-  onMelee(heavy: boolean) { this.meleeT = 0; this.meleeHeavy = heavy; this.inspectT = -1; }
+  onMelee(heavy: boolean) {
+    this.meleeT = 0; this.meleeHeavy = heavy; this.inspectT = -1;
+    if (!heavy) this.slashDir = -this.slashDir; // cortes leves alternam ida e volta
+  }
   inspect() { if (this.inspectT < 0) this.inspectT = 0; }
   isInspecting() { return this.inspectT >= 0; }
 
   update(dt: number, st: PlayerState, look: { dx: number; dy: number }, extra: { plantP: number; crouch: number; aspect: number; visible: boolean }) {
     this.time += dt;
     this.camera.aspect = extra.aspect;
+    this.camera.fov = this.fov;
     this.camera.updateProjectionMatrix();
     this.setWeapon(st.weapon);
     const m = this.cur!;
@@ -135,7 +198,7 @@ export class ViewModel {
     if (!this.holder.visible) return;
     const base = POSE[st.weapon] ?? [0.12, -0.13, -0.25];
     const speed = Math.hypot(st.vel.x, st.vel.z);
-    const sp = Math.min(1, speed / 6) * (st.onGround ? 1 : 0.2);
+    const sp = Math.min(1, speed / 6) * (st.onGround ? 1 : 0.2) * this.bob;
     this.bobT += dt * (6 + speed * 1.2) * (st.onGround ? 1 : 0.2);
     const bobX = Math.sin(this.bobT) * 0.008 * sp;
     const bobY = -Math.abs(Math.cos(this.bobT)) * 0.01 * sp;
@@ -144,8 +207,11 @@ export class ViewModel {
     const sy = this.swayY.step(Math.max(-0.05, Math.min(0.05, look.dy * 0.0009)), dt);
     const kz = this.kickZ.step(0, dt);
     const kr = this.kickR.step(0, dt);
-    let px = base[0] + bobX + sx, py = base[1] + bobY + idle + sy - extra.crouch * 0.01, pz = base[2] + kz * 0.03;
-    let rx = kr * 0.02 + sy * 0.6, ry = 0.035 + sx * 1.5, rz = -sx * 2;
+    // offsets relativos ao padrão do CS (x=1, y=1, z=-1)
+    const ox = (this.offX - 1) * 0.012, oy = (this.offZ + 1) * 0.012, oz = -(this.offY - 1) * 0.012;
+    let px = base[0] + bobX + sx + ox, py = base[1] + bobY + idle + sy - extra.crouch * 0.01 + oy, pz = base[2] + kz * 0.03 + oz;
+    const br = BASE_ROT[st.weapon] ?? [0, 0, 0];
+    let rx = br[0] + kr * 0.02 + sy * 0.6, ry = br[1] + 0.035 + sx * 1.5, rz = br[2] - sx * 2;
     // deploy
     if (st.deployT > 0) {
       const k = Math.min(1, st.deployT / Math.max(0.1, def.deployTime));
@@ -189,13 +255,13 @@ export class ViewModel {
     // faca
     if (this.meleeT >= 0) {
       this.meleeT += dt;
-      const T = this.meleeHeavy ? 0.6 : 0.35;
+      const T = this.meleeHeavy ? 0.78 : 0.4;
       const f = this.meleeT / T;
       if (f >= 1) this.meleeT = -1;
       else {
-        const s = Math.sin(f * Math.PI);
-        if (this.meleeHeavy) { rx -= s * 1.2; pz -= s * 0.12; py += s * 0.05; }
-        else { ry += s * 1.0; rz -= s * 0.6; px -= s * 0.12; pz -= s * 0.08; }
+        const keys = this.meleeHeavy ? STAB : this.slashDir > 0 ? SLASH_A : SLASH_B;
+        const [dx, dy, dz, drx, dry, drz] = sampleKeys(keys, f);
+        px += dx; py += dy; pz += dz; rx += drx; ry += dry; rz += drz;
       }
     }
     // granada: puxando o pino
