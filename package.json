@@ -1,0 +1,27 @@
+{
+  "name": "ebrashot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ebrashot - FPS tático low poly para navegador (PC + Mobile), offline com bots e multiplayer autoritativo.",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "tsx server/index.ts",
+    "sim": "tsx scripts/simulate.ts",
+    "test:mp": "tsx scripts/mp-test.ts"
+  },
+  "dependencies": {
+    "three": "0.170.0",
+    "tsx": "4.19.2",
+    "ws": "8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/three": "0.170.0",
+    "@types/ws": "8.5.13",
+    "typescript": "5.7.2",
+    "vite": "6.0.7"
+  }
+}
